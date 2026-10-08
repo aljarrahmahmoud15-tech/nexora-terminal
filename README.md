@@ -1,6 +1,10 @@
-# NEXORA Console (CLI On-Demand)
+# NEXORA COMMAND · META-BOT NODE
 
-A clean "Web4-style" console UI + Linux bridge API that runs a whitelisted set of commands to trigger your Python module agent.
+A command console, HMAC-secured terminal ingress, and Arabic RTL operations dashboard for monitoring NEXORA Terminal nodes.
+
+## Control Center
+
+The backend now serves the embedded administration UI at `http://localhost:8787` and exposes live control endpoints for devices, HMAC requests, security events, and integration keys. See [HMAC_INTEGRATION.md](HMAC_INTEGRATION.md) for the signing contract and production configuration.
 
 ## 📚 Documentation
 - **[English Documentation](README.md)** - Complete guide in English
