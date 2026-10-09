@@ -29,7 +29,7 @@ npm i
 npm start
 ```
 - Default port: `8787`
-- Adjust `commands.json` to only contain safe and necessary commands.
+- Adjust `commands.json` to only contain safe and necessary commands.k
 
 ### Running Frontend (Web Terminal)
 ```bash
