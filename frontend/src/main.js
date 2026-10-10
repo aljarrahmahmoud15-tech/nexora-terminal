@@ -112,7 +112,7 @@ async function bootstrap() {
     render();
     loadLiveData();
     loadRenderServices();
-    if (!window.__nexoraRenderRefreshTimer) window.__nexoraRenderRefreshTimer = setInterval(() => { if (document.visibilityState === 'visible') loadRenderServices(); }, 60_000);
+    if (!window.__nexoraRenderRefreshTimer) window.__nexoraRenderRefreshTimer = setInterval(() => { if (document.visibilityState === 'visible') loadRenderServices(); }, 5 * 60_000);
   } catch { app.innerHTML = '<div class="nexora-login" dir="rtl"><div class="nexora-login-card"><h1>تعذر الاتصال بالخادم</h1><p>تحقق من اتصال الشبكة ثم أعد تحميل الصفحة.</p></div></div>'; }
 }
 
