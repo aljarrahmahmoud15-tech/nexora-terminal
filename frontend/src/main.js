@@ -22,35 +22,13 @@ const icon = (name, size = 19) => {
   return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths[name] || paths.grid}</svg>`;
 };
 
-let stations = [
-  { id: 'NX-00421', name: 'محطة الرياض — البوابة الشمالية', type: 'Kiosk Prime', status: 'online', last: 'منذ 18 ثانية', ip: '10.24.8.41', version: '2.8.1', region: 'الرياض' },
-  { id: 'NX-00419', name: 'محطة جدة — صالة الوصول', type: 'Kiosk Prime', status: 'online', last: 'منذ 42 ثانية', ip: '10.24.6.18', version: '2.8.1', region: 'جدة' },
-  { id: 'NX-00388', name: 'محطة الدمام — المدخل الرئيسي', type: 'Terminal Edge', status: 'warning', last: 'منذ 4 دقائق', ip: '10.18.3.72', version: '2.7.9', region: 'الدمام' },
-  { id: 'NX-00352', name: 'محطة أبوظبي — المبنى B', type: 'Terminal Edge', status: 'offline', last: 'منذ 2 ساعة', ip: '10.16.4.09', version: '2.7.8', region: 'أبوظبي' },
-  { id: 'NX-00341', name: 'محطة دبي — مركز العمليات', type: 'Kiosk Prime', status: 'online', last: 'منذ 8 دقائق', ip: '10.12.9.11', version: '2.8.1', region: 'دبي' },
-];
+let stations = [];
 
-let requests = [
-  { time: '02:14:21', method: 'POST', path: '/v1/terminal/heartbeat', device: 'NX-00421', status: 'verified', latency: '84ms', hash: 'd5f0…a9c1' },
-  { time: '02:14:19', method: 'GET', path: '/v1/config/poll', device: 'NX-00419', status: 'verified', latency: '112ms', hash: 'a1e3…7f02' },
-  { time: '02:13:57', method: 'POST', path: '/v1/terminal/event', device: 'NX-00388', status: 'rejected', latency: '48ms', hash: '90b8…d120' },
-  { time: '02:13:41', method: 'POST', path: '/v1/terminal/heartbeat', device: 'NX-00341', status: 'verified', latency: '76ms', hash: 'f3aa…18de' },
-  { time: '02:12:04', method: 'GET', path: '/v1/config/poll', device: 'NX-00421', status: 'verified', latency: '95ms', hash: 'b992…4ce0' },
-  { time: '02:11:48', method: 'POST', path: '/v1/terminal/event', device: 'NX-00352', status: 'expired', latency: '—', hash: '22d1…8a01' },
-];
+let requests = [];
 
-let securityEvents = [
-  { level: 'high', title: 'تم رفض توقيع HMAC', detail: 'NX-00388 أرسل توقيعًا غير مطابق للمسار /v1/terminal/event', time: 'منذ 17 دقيقة', code: 'SIG_MISMATCH' },
-  { level: 'medium', title: 'محاولة استخدام مفتاح منتهي', detail: 'المفتاح key_live_••••91f4 لم يعد فعالًا', time: 'منذ 36 دقيقة', code: 'KEY_EXPIRED' },
-  { level: 'low', title: 'تم تدوير مفتاح وصول', detail: 'تم التدوير بواسطة system-admin من لوحة التحكم', time: 'منذ ساعة', code: 'KEY_ROTATED' },
-  { level: 'medium', title: 'تأخر في نبض المحطة', detail: 'NX-00352 لم يرسل heartbeat خلال المهلة المحددة', time: 'منذ ساعتين', code: 'HEARTBEAT_LATE' },
-];
+let securityEvents = [];
 
-let keys = [
-  { name: 'production-terminal', id: 'key_live_••••91f4', created: '12 سبتمبر 2026', status: 'active', used: 'منذ 18 ثانية' },
-  { name: 'staging-terminal', id: 'key_test_••••72a1', created: '03 سبتمبر 2026', status: 'active', used: 'منذ 4 ساعات' },
-  { name: 'legacy-gateway', id: 'key_live_••••08b9', created: '14 يوليو 2026', status: 'disabled', used: 'منذ 27 يومًا' },
-];
+let keys = [];
 
 const state = {
   section: 'dashboard',
@@ -62,11 +40,14 @@ const state = {
   toast: null,
   menuOpen: false,
   live: false,
+  renderServices: [],
+  renderError: '',
+  renderFetchedAt: '',
 };
 
-const API_BASE = window.NEXORA_API_BASE || '';
+const API_BASE = ''; // Keep admin cookies same-origin; never send credentials to another host.
 async function apiGet(path) {
-  const response = await fetch(`${API_BASE}${path}`, { headers: { Accept: 'application/json' } });
+  const response = await fetch(`${API_BASE}${path}`, { credentials: 'same-origin', headers: { Accept: 'application/json' } });
   if (!response.ok) throw new Error(`API ${response.status}`);
   return response.json();
 }
@@ -89,11 +70,58 @@ async function loadLiveData() {
   }
 }
 
+
+async function renderLogin() {
+  app.innerHTML = `<div class="nexora-login" dir="rtl"><form id="nexora-login-form" class="nexora-login-card"><div class="eyebrow">NEXORA COMMAND · دخول محمي</div><h1>تسجيل دخول المدير</h1><p>أدخل مفتاح الإدارة المحفوظ في إعدادات الخادم. لا تحفظه الواجهة.</p><label for="nexora-admin-secret">مفتاح الإدارة</label><input id="nexora-admin-secret" type="password" autocomplete="current-password" required minlength="32" /><button class="button primary" type="submit">دخول آمن</button><div id="nexora-login-error" role="alert"></div></form></div>`;
+  document.querySelector('#nexora-login-form')?.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const input = document.querySelector('#nexora-admin-secret');
+    const error = document.querySelector('#nexora-login-error');
+    const button = event.currentTarget.querySelector('button');
+    button.disabled = true;
+    try {
+      const response = await fetch('/api/auth/login', { method: 'POST', credentials: 'same-origin', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ secret: input.value }) });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.error || 'تعذر تسجيل الدخول');
+      input.value = '';
+      await bootstrap();
+    } catch (err) { error.textContent = err.message; button.disabled = false; }
+  });
+}
+async function loadRenderServices() {
+  state.renderError = '';
+  try {
+    const response = await apiGet('/api/render/services');
+    state.renderServices = Array.isArray(response.services) ? response.services : [];
+    state.renderFetchedAt = response.fetchedAt || '';
+  } catch (err) {
+    state.renderError = err.message === 'API 503' ? 'لم يُضف مفتاح Render إلى إعدادات الخادم بعد.' : 'تعذر قراءة الخدمات من Render. تحقق من إعداد المفتاح وصلاحيته.';
+  }
+  render();
+}
+function renderRenderServices() {
+  const cards = state.renderServices.map((service) => `<article class="render-service-card"><div><strong>${escapeHtml(service.name)}</strong><small>${escapeHtml(service.type)} · ${escapeHtml(service.region || 'المنطقة غير متاحة')}</small></div><span class="render-status ${service.suspended ? 'suspended' : 'active'}">${service.suspended ? 'معلّقة' : escapeHtml(service.latestDeploy?.status || 'حالة النشر غير معروفة')}</span><div class="render-service-meta"><code>${escapeHtml(service.id)}</code>${service.url ? `<a href="${escapeHtml(service.url)}" target="_blank" rel="noopener noreferrer">فتح الخدمة</a>` : ''}${service.dashboardUrl ? `<a href="${escapeHtml(service.dashboardUrl)}" target="_blank" rel="noopener noreferrer">لوحة Render</a>` : ''}</div></article>`).join('');
+  return `${sectionTitle('المراقبة / Render API', 'خدمات Render', 'قراءة فقط من حساب Render. لا تتوفر من هذه اللوحة أزرار نشر أو إعادة تشغيل أو تعديل.', button('تحديث الآن', 'button secondary', 'refresh-render', 'refresh'))}<section class="panel render-panel"><div class="panel-head"><div><h2>الخدمات المرتبطة</h2><p>${state.renderServices.length} خدمة${state.renderFetchedAt ? ` · آخر قراءة ${new Date(state.renderFetchedAt).toLocaleString('ar')}` : ''}</p></div><span class="live-label"><i></i> قراءة فقط</span></div>${state.renderError ? `<p class="render-error" role="status">${escapeHtml(state.renderError)}</p>` : ''}${cards || (!state.renderError ? '<p class="render-empty">لم تُقرأ الخدمات بعد. استخدم زر التحديث.</p>' : '')}</section>`;
+}
+async function bootstrap() {
+  try {
+    const response = await fetch('/api/auth/session', { credentials: 'same-origin', headers: { Accept: 'application/json' } });
+    const session = await response.json();
+    if (!session.configured) { app.innerHTML = '<div class="nexora-login" dir="rtl"><div class="nexora-login-card"><h1>الإدارة غير مهيأة</h1><p>يجب ضبط CONTROL_API_KEY في أسرار خدمة الخادم (32 محرفًا على الأقل)، ثم إعادة النشر.</p></div></div>'; return; }
+    if (!session.authenticated) { await renderLogin(); return; }
+    render();
+    loadLiveData();
+    loadRenderServices();
+    if (!window.__nexoraRenderRefreshTimer) window.__nexoraRenderRefreshTimer = setInterval(() => { if (document.visibilityState === 'visible') loadRenderServices(); }, 60_000);
+  } catch { app.innerHTML = '<div class="nexora-login" dir="rtl"><div class="nexora-login-card"><h1>تعذر الاتصال بالخادم</h1><p>تحقق من اتصال الشبكة ثم أعد تحميل الصفحة.</p></div></div>'; }
+}
+
 const navItems = [
   { id: 'dashboard', label: 'لوحة التحكم', icon: 'grid', group: 'المراقبة' },
   { id: 'devices', label: 'الأجهزة والمحطات', icon: 'cpu', group: 'المراقبة', badge: '5' },
   { id: 'requests', label: 'طلبات HMAC', icon: 'activity', group: 'المراقبة', badge: '24' },
   { id: 'security', label: 'النشاط الأمني', icon: 'shield', group: 'الإدارة' },
+  { id: 'render', label: 'خدمات Render', icon: 'activity', group: 'المراقبة' },
   { id: 'integration', label: 'تفاصيل التكامل', icon: 'link', group: 'الإدارة' },
   { id: 'settings', label: 'الإعدادات', icon: 'settings', group: 'الإدارة' },
 ];
@@ -147,7 +175,7 @@ function renderShell(content) {
 
 function renderDashboard() {
   const recent = requests.slice(0, 4);
-  return `${sectionTitle('نظرة عامة / 09 أكتوبر 2026', 'كل شيء تحت المراقبة.', 'راقب صحة محطاتك، تحقق من التوقيعات، وتعامل مع التنبيهات قبل أن تتحول إلى مشكلة.', button('تحديث البيانات', 'button secondary', 'refresh', 'refresh'))}
+  return `<div class="render-error" role="note">ملاحظة: مؤشرات المحطات وسجل Nexora الطرفي في هذه النسخة توضيحية حتى ربط محطات HMAC الحقيقية. بيانات Render الحية في قسم «خدمات Render».</div>${sectionTitle('نظرة عامة', 'كل شيء تحت المراقبة.', 'راقب صحة محطاتك، تحقق من التوقيعات، وتعامل مع التنبيهات قبل أن تتحول إلى مشكلة.', button('تحديث البيانات', 'button secondary', 'refresh', 'refresh'))}
     <div class="stat-grid">
       <div class="stat-card"><div class="stat-top"><span>المحطات المتصلة</span><span class="stat-icon green">${icon('cpu', 18)}</span></div><div class="stat-value">24 <small>/ 26</small></div><div class="stat-foot positive">${icon('arrow', 13)} <span>+2.4%</span><em>منذ الأمس</em></div></div>
       <div class="stat-card"><div class="stat-top"><span>طلبات HMAC اليوم</span><span class="stat-icon blue">${icon('activity', 18)}</span></div><div class="stat-value">18,492</div><div class="stat-foot positive">${icon('arrow', 13)} <span>+8.1%</span><em>عن المتوسط</em></div></div>
@@ -232,6 +260,7 @@ function render() {
   if (state.section === 'devices') content = renderDevices();
   if (state.section === 'requests') content = renderRequests();
   if (state.section === 'security') content = renderSecurity();
+  if (state.section === 'render') content = renderRenderServices();
   if (state.section === 'integration') content = renderIntegration();
   if (state.section === 'settings') content = renderSettings();
   app.innerHTML = renderShell(content);
@@ -259,7 +288,8 @@ function handleAction(action, element) {
   if (action === 'go-devices') { state.section = 'devices'; render(); }
   if (action === 'go-requests') { state.section = 'requests'; render(); }
   if (action === 'go-security') { state.section = 'security'; render(); }
-  if (action === 'refresh') showToast('تم تحديث بيانات المراقبة');
+  if (action === 'refresh') showToast('بيانات المراقبة المعروضة');
+  if (action === 'refresh-render') loadRenderServices();
   if (action === 'notify') showToast('لديك تنبيه أمني واحد عالي الخطورة');
   if (action === 'export') showToast('تم تجهيز سجل الطلبات للتصدير');
   if (action === 'test-connection') showToast('الاتصال ناجح — زمن الاستجابة 86ms');
@@ -271,5 +301,4 @@ function handleAction(action, element) {
   if (action === 'copy-request') showToast('تم نسخ تفاصيل الطلب');
   if (action === 'show-event') showToast(`تم فتح الحدث ${element.dataset.code}`);
 }
-render();
-loadLiveData();
+bootstrap();

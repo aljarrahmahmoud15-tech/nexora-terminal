@@ -23,6 +23,7 @@ import {
 
 dotenv.config();
 const app = express();
+app.set("trust proxy", 1);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(__dirname, "../frontend");
 const PORT = Number(process.env.PORT || 8787);
@@ -30,7 +31,7 @@ const COMMANDS_FILE = process.env.COMMANDS_FILE || "./commands.json";
 const CLOCK_SKEW = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
 const DANGEROUS = /[;&|`$<>]/g;
 
-app.use(cors({ origin: process.env.CORS_ORIGIN || "*" }));
+app.use(cors({ origin: process.env.CORS_ORIGIN || false, credentials: true }));
 app.use(express.json({ limit: "1mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 
 function loadCommands() {
@@ -59,13 +60,61 @@ function rejectHmac(req, res, reason, level = "high") {
   addSecurityEvent({ level, title: "تم رفض توقيع HMAC", detail: `${device}: ${reason}`, code: "SIG_REJECTED" });
   return res.status(401).json({ ok: false, error: "HMAC verification failed" });
 }
+const AUTH_COOKIE = process.env.NODE_ENV === "production" ? "__Host-nexora-admin" : "nexora-admin-dev";
+const AUTH_TTL_SECONDS = 30 * 60;
+const authAttempts = new Map();
+function authSignature(payload) {
+  return crypto.createHmac("sha256", process.env.CONTROL_API_KEY || "").update(`nexora-admin-session-v1\0${payload}`).digest("base64url");
+}
+function validAdminCookie(req) {
+  const raw = req.headers.cookie || "";
+  const match = raw.split(";").map((part) => part.trim()).find((part) => part.startsWith(`${AUTH_COOKIE}=`));
+  if (!match) return false;
+  const token = decodeURIComponent(match.slice(AUTH_COOKIE.length + 1));
+  const [expiresText, nonce, signature, extra] = token.split(".");
+  if (extra || !/^\d{10,13}$/.test(expiresText || "") || !/^[A-Za-z0-9_-]{20,}$/.test(nonce || "")) return false;
+  if (Number(expiresText) <= Math.floor(Date.now() / 1000)) return false;
+  return constantTimeEqual(signature, authSignature(`${expiresText}.${nonce}`));
+}
+function sameOrigin(req) {
+  const origin = req.get("origin");
+  if (!origin) return true;
+  try { const forwarded = (req.get("x-forwarded-proto") || req.protocol).split(",")[0].trim(); return new URL(origin).origin === `${forwarded}://${req.get("host")}`; } catch { return false; }
+}
 function requireControlKey(req, res, next) {
   const expected = process.env.CONTROL_API_KEY;
-  if (!expected) return process.env.NODE_ENV === "production" ? res.status(503).json({ ok: false, error: "CONTROL_API_KEY is not configured" }) : next();
+  if (!expected || expected.length < 32) return res.status(503).json({ ok: false, error: "Admin authentication is not configured" });
   const supplied = req.get("x-control-key") || req.get("authorization")?.replace(/^Bearer\s+/i, "");
-  if (!constantTimeEqual(supplied, expected)) return res.status(401).json({ ok: false, error: "Control authentication required" });
-  next();
+  if (validAdminCookie(req) || (supplied && constantTimeEqual(supplied, expected))) return next();
+  return res.status(401).json({ ok: false, error: "Authentication required" });
 }
+app.get("/api/auth/session", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json({ configured: Boolean(process.env.CONTROL_API_KEY && process.env.CONTROL_API_KEY.length >= 32), authenticated: validAdminCookie(req) });
+});
+app.post("/api/auth/login", (req, res) => {
+  res.set("Cache-Control", "no-store");
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+  const expected = process.env.CONTROL_API_KEY || "";
+  if (expected.length < 32) return res.status(503).json({ ok: false, error: "Admin authentication is not configured" });
+  const ip = req.ip || "unknown";
+  const now = Date.now();
+  const attempt = authAttempts.get(ip);
+  if (attempt && attempt.resetAt > now && attempt.count >= 5) return res.status(429).json({ ok: false, error: "Too many login attempts" });
+  if (!attempt || attempt.resetAt <= now) authAttempts.set(ip, { count: 1, resetAt: now + 15 * 60_000 }); else attempt.count++;
+  if (!constantTimeEqual(req.body?.secret, expected)) return res.status(401).json({ ok: false, error: "Invalid credentials" });
+  authAttempts.delete(ip);
+  const expiry = Math.floor(now / 1000) + AUTH_TTL_SECONDS;
+  const payload = `${expiry}.${crypto.randomBytes(24).toString("base64url")}`;
+  const token = `${payload}.${authSignature(payload)}`;
+  res.append("Set-Cookie", `${AUTH_COOKIE}=${encodeURIComponent(token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${AUTH_TTL_SECONDS}${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+  res.json({ authenticated: true });
+});
+app.post("/api/auth/logout", (req, res) => {
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+  res.append("Set-Cookie", `${AUTH_COOKIE}=; Path=/; HttpOnly; SameSite=Strict; Max-Age=0${process.env.NODE_ENV === "production" ? "; Secure" : ""}`);
+  res.json({ authenticated: false });
+});
 function requireHmac(req, res, next) {
   req.hmacStartedAt = Date.now();
   const keyId = req.get("x-nexora-key");
@@ -119,11 +168,53 @@ app.post("/api/terminal/event", requireHmac, (req, res) => {
   res.status(202).json({ ok: true, accepted: true, serverTime: new Date().toISOString() });
 });
 
-app.get("/api/commands", (_req, res) => {
+app.get("/api/render/services", requireControlKey, async (_req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  const token = process.env.RENDER_API_KEY || "";
+  if (!token) return res.status(503).json({ ok: false, configured: false, error: "Render API key is not configured" });
+  try {
+    const items = [];
+    let cursor;
+    for (let page = 0; page < 10; page++) {
+      const url = new URL("https://api.render.com/v1/services");
+      url.searchParams.set("limit", "100");
+      if (cursor) url.searchParams.set("cursor", cursor);
+      const response = await fetch(url, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(12_000), redirect: "error" });
+      if (!response.ok) return res.status(response.status === 401 || response.status === 403 ? 502 : 503).json({ ok: false, configured: true, error: "Unable to read Render services" });
+      const pageData = await response.json();
+      if (!Array.isArray(pageData)) throw new Error("Unexpected Render response");
+      for (const entry of pageData) {
+        const service = entry?.service;
+        if (!service || typeof service.id !== "string") continue;
+        items.push({ id: service.id, name: String(service.name || "Unknown"), type: String(service.type || "unknown"), url: typeof service.serviceDetails?.url === "string" ? service.serviceDetails.url : null, dashboardUrl: typeof service.dashboardUrl === "string" ? service.dashboardUrl : null, suspended: service.suspended === "suspended", updatedAt: service.updatedAt || null, region: service.serviceDetails?.region || null });
+      }
+      cursor = pageData.at(-1)?.cursor;
+      if (!cursor || pageData.length === 0) break;
+    }
+    for (let offset = 0; offset < items.length; offset += 10) {
+      await Promise.all(items.slice(offset, offset + 10).map(async (service) => {
+        try {
+          const deployUrl = new URL(`https://api.render.com/v1/services/${encodeURIComponent(service.id)}/deploys`);
+          deployUrl.searchParams.set("limit", "1");
+          const response = await fetch(deployUrl, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000), redirect: "error" });
+          if (!response.ok) return;
+          const entries = await response.json();
+          const deploy = Array.isArray(entries) ? entries[0]?.deploy : null;
+          if (deploy) service.latestDeploy = { status: String(deploy.status || "unknown"), createdAt: deploy.createdAt || null };
+        } catch { /* A per-service deploy status is optional; keep the service row. */ }
+      }));
+    }
+    res.json({ ok: true, readOnly: true, fetchedAt: new Date().toISOString(), count: items.length, services: items });
+  } catch {
+    res.status(503).json({ ok: false, configured: true, error: "Unable to reach Render API" });
+  }
+});
+
+app.get("/api/commands", requireControlKey, (_req, res) => {
   const commands = loadCommands().map(({ id, title, description, exampleArgs }) => ({ id, title, description, exampleArgs: exampleArgs || {} }));
   res.json({ commands });
 });
-app.post("/api/run", async (req, res) => {
+app.post("/api/run", requireControlKey, async (req, res) => {
   try {
     const { commandId, args } = req.body || {};
     if (!commandId) return res.status(400).json({ error: "commandId is required" });
@@ -156,16 +247,16 @@ function ghGetSha(owner, repo, filePath, branch, token) { return ghRequest("GET"
 function ghPutContent(owner, repo, filePath, branch, token, content, message, sha) { const body = { message: message || "Update via NEXORA Bridge", content: Buffer.from(content, "utf8").toString("base64"), branch }; if (sha) body.sha = sha; return ghRequest("PUT", `/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}`, token, body); }
 function runGit(args, cwd) { return new Promise((resolve) => { const child = spawn("git", args, { cwd: cwd || process.cwd(), shell: false }); let stdout = ""; let stderr = ""; child.stdout.on("data", (data) => { stdout += data.toString(); }); child.stderr.on("data", (data) => { stderr += data.toString(); }); child.on("close", (code) => resolve({ code, stdout, stderr })); }); }
 
-app.post("/api/github/sync-commands", async (_req, res) => {
+app.post("/api/github/sync-commands", requireControlKey, async (_req, res) => {
   try { const owner = process.env.GITHUB_OWNER || ""; const repo = process.env.GITHUB_REPO || ""; const branch = process.env.GITHUB_BRANCH || "main"; const token = process.env.GITHUB_TOKEN || ""; const destination = process.env.GITHUB_PATH || "backend/commands.json"; if (!owner || !repo || !token) return res.status(400).json({ ok: false, error: "Missing GitHub configuration" }); const content = fs.existsSync(COMMANDS_FILE) ? fs.readFileSync(COMMANDS_FILE, "utf8") : "[]"; const sha = await ghGetSha(owner, repo, destination, branch, token).catch(() => null); const result = await ghPutContent(owner, repo, destination, branch, token, content, "Sync commands.json", sha); res.json({ ok: true, url: result?.content?.html_url || "", message: `Synced to ${owner}/${repo}:${branch}/${destination}` }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
 });
-app.post("/api/github/create-repo", async (_req, res) => {
+app.post("/api/github/create-repo", requireControlKey, async (_req, res) => {
   try { const token = process.env.GITHUB_TOKEN || ""; const repo = process.env.GITHUB_REPO || ""; const isPrivate = String(process.env.GITHUB_PRIVATE || "true") === "true"; if (!token || !repo) return res.status(400).json({ ok: false, error: "Missing GitHub token or repo" }); await ghRequest("POST", "/user/repos", token, { name: repo, private: isPrivate, auto_init: false }).catch((error) => { if (!String(error?.message || "").includes("already exists")) throw error; }); res.json({ ok: true, message: "Repository ensured" }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
 });
-app.post("/api/github/connect", async (_req, res) => {
+app.post("/api/github/connect", requireControlKey, async (_req, res) => {
   try { const token = process.env.GITHUB_TOKEN || ""; const owner = process.env.GITHUB_OWNER || ""; const repo = process.env.GITHUB_REPO || ""; const branch = process.env.GITHUB_BRANCH || "main"; const remoteName = process.env.GIT_REMOTE_NAME || "origin"; if (!token || !owner || !repo) return res.status(400).json({ ok: false, error: "Missing GitHub configuration" }); const url = `https://${token}@github.com/${owner}/${repo}.git`; await runGit(["init"]); await runGit(["config", "user.name", process.env.GIT_USER_NAME || "NEXORA"]); await runGit(["config", "user.email", process.env.GIT_USER_EMAIL || "noreply@nexora.local"]); const added = await runGit(["remote", "add", remoteName, url]); if (added.code !== 0) await runGit(["remote", "set-url", remoteName, url]); await runGit(["add", "-A"]); await runGit(["commit", "-m", "Initial commit"]); await runGit(["branch", "-M", branch]); res.json({ ok: true, message: "Connected to remote" }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
 });
-app.post("/api/github/push", async (_req, res) => { const remoteName = process.env.GIT_REMOTE_NAME || "origin"; const branch = process.env.GIT_BRANCH || process.env.GITHUB_BRANCH || "main"; const result = await runGit(["push", "-u", remoteName, branch]); res.json({ ok: result.code === 0, code: result.code, stdout: result.stdout, stderr: result.stderr }); });
+app.post("/api/github/push", requireControlKey, async (_req, res) => { const remoteName = process.env.GIT_REMOTE_NAME || "origin"; const branch = process.env.GIT_BRANCH || process.env.GITHUB_BRANCH || "main"; const result = await runGit(["push", "-u", remoteName, branch]); res.json({ ok: result.code === 0, code: result.code, stdout: result.stdout, stderr: result.stderr }); });
 
 if (fs.existsSync(frontendDir)) app.use(express.static(frontendDir, { index: "index.html" }));
 app.get("*", (req, res, next) => { if (req.path.startsWith("/api/")) return next(); const indexPath = path.join(frontendDir, "index.html"); if (fs.existsSync(indexPath)) return res.sendFile(indexPath); res.status(404).json({ ok: false, error: "Frontend not installed" }); });
