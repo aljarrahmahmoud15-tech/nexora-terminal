@@ -49,7 +49,7 @@ before(async () => {
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['server.js'], {
     cwd: new URL('.', import.meta.url),
-    env: { ...process.env, PORT: String(port), NODE_ENV: 'production', CONTROL_API_KEY: adminSecret, COMMANDS_FILE: commandsFile, NEXORA_KEYS_JSON: JSON.stringify([{ name: 'test-terminal', id: 'test-key', secret: hmacSecret, status: 'active' }]) },
+    env: { ...process.env, PORT: String(port), NODE_ENV: 'production', CONTROL_API_KEY: adminSecret, COMMANDS_FILE: commandsFile, NEXORA_KEYS_JSON: JSON.stringify([{ name: 'test-terminal', id: 'test-key', secret: hmacSecret, status: 'active' }]), OPENROUTER_API_KEY: '', OPENROUTER_MODEL: '' },
     stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
@@ -64,7 +64,7 @@ after(() => {
 });
 
 test('all management, command, and GitHub routes reject unauthenticated requests', async () => {
-  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/commands', '/api/render/services']) {
+  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/control/openrouter/status', '/api/commands', '/api/render/services']) {
     assert.equal((await fetch(`${base}${pathName}`)).status, 401, pathName);
   }
   for (const pathName of ['/api/run', '/api/github/push', '/api/github/create-repo', '/api/github/connect', '/api/github/sync-commands']) {
@@ -125,6 +125,16 @@ test('command catalog exposes only the whitelist, requires explicit service conf
   assert.ok(statuses.includes('success'));
   assert.ok(statuses.includes('confirmation_required'));
   assert.equal(executions.find((entry) => entry.service === 'test-only-no-service').status, 'success');
+});
+
+test('OpenRouter status is authenticated, reports unconfigured and untested state, and never returns a key', async () => {
+  const cookie = await adminCookie();
+  const response = await fetch(`${base}/api/control/openrouter/status`, { headers: { cookie } });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('cache-control'), 'no-store, private');
+  const body = await response.json();
+  assert.deepEqual(body, { configured: false, model: null, lastTest: { status: 'not_run', testedAt: null } });
+  assert.doesNotMatch(JSON.stringify(body), /OPENROUTER_API_KEY|secret|Bearer/i);
 });
 
 test('telemetry starts empty and only a valid HMAC heartbeat creates a live device', async () => {

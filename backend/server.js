@@ -170,6 +170,14 @@ app.get("/api/control/requests", requireControlKey, (_req, res) => res.json({ re
 app.get("/api/control/security", requireControlKey, (_req, res) => res.json({ events: listSecurityEvents() }));
 app.get("/api/control/keys", requireControlKey, (_req, res) => res.json({ keys: listKeys() }));
 app.get("/api/control/executions", requireControlKey, (_req, res) => res.json({ executions: listExecutions(), retention: "آخر 100 تنفيذ في ذاكرة العملية" }));
+app.get("/api/control/openrouter/status", requireControlKey, (_req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  res.json({
+    configured: Boolean(process.env.OPENROUTER_API_KEY?.trim()),
+    model: process.env.OPENROUTER_MODEL?.trim() || null,
+    lastTest: { status: "not_run", testedAt: null },
+  });
+});
 app.post("/api/control/keys", requireControlKey, (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return res.status(400).json({ ok: false, error: "name is required" });

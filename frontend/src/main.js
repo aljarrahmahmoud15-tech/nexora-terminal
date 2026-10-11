@@ -44,8 +44,8 @@ const executionLabel = { success: 'نجح', failed: 'فشل', timeout: 'انته
 const state = {
   section: 'dashboard', menuOpen: false, modal: null, toast: '', search: '', deviceFilter: 'all', requestFilter: 'all', securityFilter: 'all',
   live: false, liveError: '', lastSync: '', overview: null, stations: [], requests: [], securityEvents: [], keys: [], executions: [],
-  commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null,
-  renderServices: [], renderError: '', renderFetchedAt: '',
+  commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null, executionStatus: 'idle', executing: false,
+  renderServices: [], renderError: '', renderFetchedAt: '', openRouterStatus: null, openRouterError: '',
 };
 
 function escapeHtml(value) {
@@ -87,7 +87,8 @@ function sectionTitle(kicker, title, description, actions = '') {
   return `<div class="page-heading"><div><div class="eyebrow">${escapeHtml(kicker)}</div><h1>${escapeHtml(title)}</h1><p>${escapeHtml(description)}</p></div><div class="heading-actions">${actions}</div></div>`;
 }
 function commandCatalogStatus() {
-  if (state.commandError) return { cls: 'warning', text: 'تعذر قراءة الكتالوج' };
+  if (state.commandError) return { cls: 'warning', text: 'مصدر الأوامر غير متاح' };
+  if (!state.commandsConfigured && state.commandsReason === 'invalid') return { cls: 'warning', text: 'قائمة الخادم غير صالحة' };
   if (!state.commandsConfigured) return { cls: 'warning', text: 'كتالوج الأوامر غير مهيأ' };
   if (!state.commands.length) return { cls: 'warning', text: 'الكتالوج فارغ' };
   return { cls: 'online', text: `${state.commands.length} أمرًا مسموحًا` };
@@ -102,9 +103,9 @@ function bridgeStatus() {
     : { cls: 'warning', text: 'لا توجد محطة بنبض حديث' };
 }
 async function loadLiveData() {
-  const [overview, devices, requests, security, keys, executions, commandCatalog] = await Promise.allSettled([
+  const [overview, devices, requests, security, keys, executions, commandCatalog, openRouter] = await Promise.allSettled([
     apiRequest('/api/control/overview'), apiRequest('/api/control/devices'), apiRequest('/api/control/requests'),
-    apiRequest('/api/control/security'), apiRequest('/api/control/keys'), apiRequest('/api/control/executions'), apiRequest('/api/commands'),
+    apiRequest('/api/control/security'), apiRequest('/api/control/keys'), apiRequest('/api/control/executions'), apiRequest('/api/commands'), apiRequest('/api/control/openrouter/status'),
   ]);
   state.live = overview.status === 'fulfilled';
   state.liveError = overview.status === 'rejected' ? overview.reason.message : '';
@@ -122,9 +123,12 @@ async function loadLiveData() {
     if (!state.commands.some((command) => command.id === state.selectedCommandId)) state.selectedCommandId = state.commands[0]?.id || '';
   } else {
     state.commandsConfigured = false;
+    state.commandsReason = 'unavailable';
     state.commands = [];
     state.commandError = commandCatalog.reason.message;
   }
+  state.openRouterStatus = openRouter.status === 'fulfilled' ? openRouter.value : null;
+  state.openRouterError = openRouter.status === 'rejected' ? openRouter.reason.message : '';
   state.lastSync = state.live ? new Date().toISOString() : '';
   render();
 }
@@ -195,51 +199,64 @@ function renderStatusBanner() {
   const bridge = bridgeStatus();
   const commands = commandCatalogStatus();
   const noHeartbeat = state.overview?.telemetry?.configured && !state.overview?.telemetry?.heartbeatReceived;
-  return `<div class="ops-banner ${bridge.cls === 'online' ? 'ok' : 'warn'}"><div class="ops-banner-icon">${icon(bridge.cls === 'online' ? 'activity' : 'alert', 20)}</div><div class="ops-banner-copy"><strong>${escapeHtml(bridge.text)}</strong><p>${noHeartbeat ? 'مفاتيح HMAC مهيأة، لكن لم يصل أي نبض بعد؛ لن تُعرض أجهزة أو مؤشرات تجريبية.' : !state.overview?.telemetry?.configured ? 'يلزم إعداد مفتاح HMAC فعّال في الخادم لاستقبال نبضات الجسر.' : state.liveError ? escapeHtml(state.liveError) : 'قراءة مباشرة من واجهات NEXORA ذات المصدر نفسه.'}</p></div><div class="ops-banner-side"><span class="mini-status ${commands.cls}">${escapeHtml(commands.text)}</span><small>${state.overview?.telemetry?.latestHeartbeat ? `آخر نبض ${escapeHtml(relativeTime(state.overview.telemetry.latestHeartbeat))}` : 'لا يوجد نبض مسجل'}</small></div></div>`;
+  const sourceMessage = !state.live
+    ? state.liveError ? `تعذر تحميل بيانات الخادم: ${escapeHtml(state.liveError)}` : 'بانتظار تحميل بيانات الخادم؛ لم تُعرض مؤشرات غير مؤكدة.'
+    : noHeartbeat ? 'مفاتيح HMAC مهيأة، لكن لم يصل أي نبض بعد؛ لن تُعرض أجهزة أو مؤشرات تجريبية.'
+      : !state.overview?.telemetry?.configured ? 'يلزم إعداد مفتاح HMAC فعّال في الخادم لاستقبال نبضات الجسر.'
+        : 'قراءة مباشرة من واجهات NEXORA ذات المصدر نفسه.';
+  return `<div class="ops-banner ${bridge.cls === 'online' ? 'ok' : 'warn'}"><div class="ops-banner-icon">${icon(bridge.cls === 'online' ? 'activity' : 'alert', 20)}</div><div class="ops-banner-copy"><strong>${escapeHtml(bridge.text)}</strong><p>${sourceMessage}</p></div><div class="ops-banner-side"><span class="mini-status ${commands.cls}">${escapeHtml(commands.text)}</span><small>${state.overview?.telemetry?.latestHeartbeat ? `آخر نبض ${escapeHtml(relativeTime(state.overview.telemetry.latestHeartbeat))}` : 'لا يوجد نبض مسجل'}</small></div></div>`;
 }
 function renderStat(label, value, caption, glyph, tone = 'blue') {
   return `<article class="stat-card ops-stat"><div class="stat-top"><span>${escapeHtml(label)}</span><span class="stat-icon ${tone}">${icon(glyph, 18)}</span></div><div class="stat-value">${escapeHtml(value)}</div><div class="stat-foot"><span>${escapeHtml(caption)}</span></div></article>`;
 }
 function renderDashboard() {
-  const overview = state.overview;
-  const telemetry = overview?.telemetry;
-  const bridgeConfigured = Boolean(telemetry?.configured);
-  const liveHeartbeats = Boolean(telemetry?.heartbeatReceived);
-  const deviceValue = !bridgeConfigured || !liveHeartbeats ? 'غير مهيأ' : `${overview.devices?.online ?? 0} / ${overview.devices?.total ?? 0}`;
-  const requestValue = overview?.requests?.total ? String(overview.requests.total) : 'بانتظار أول طلب';
-  const commandStatus = commandCatalogStatus();
-  const commandValue = !state.commandsConfigured ? 'غير مهيأ' : String(state.commands.length);
-  const securityValue = overview?.requests?.total ? String(overview.security?.open ?? 0) : 'لا توجد بيانات';
-  const commandActions = state.commands.filter((command) => command.serviceAction);
-  const recentDevices = state.stations.slice(0, 5);
-  return `${sectionTitle('NEXORA · مركز تشغيل Linux Bridge', 'مركز التشغيل المتقدم', 'اتصال مباشر وآمن بالخادم: راقب النبضات، اختر أمرًا من القائمة المسموحة، وتابع كل تنفيذ.', `${button('مزامنة الآن', 'button secondary', 'refresh-data', 'refresh')}`)}
+  const telemetry = state.overview?.telemetry;
+  const serviceCommands = state.commands.filter((command) => ['start', 'stop', 'restart'].includes(command.serviceAction?.operation));
+  const apiText = state.live ? 'متصل' : state.liveError ? 'تعذر الاتصال' : 'بانتظار المصدر';
+  const heartbeatText = telemetry?.heartbeatReceived ? fmtDate(telemetry.latestHeartbeat) : telemetry?.configured ? 'بانتظار أول نبض موثّق' : 'غير مهيأ';
+  const openRouterState = state.openRouterStatus?.configured ? 'مهيأ على الخادم' : state.openRouterError ? 'حالة الإعداد غير متاحة' : state.openRouterStatus ? 'غير مهيأ' : 'بانتظار المصدر';
+  const openRouterTest = ({ success: 'نجح آخر اختبار', failed: 'فشل آخر اختبار', not_run: 'لم يُجر اختبار بعد' })[state.openRouterStatus?.lastTest?.status] || 'حالة الاختبار غير متاحة';
+  const openRouterModel = state.openRouterStatus?.model || 'غير محدد';
+  return `${sectionTitle('NEXORA · Linux Bridge', 'مركز تشغيل الجسر', 'اختر أمرًا من قائمة الخادم المسموحة، راجع مدخلاته، ثم تابع حالة التنفيذ ومخرجاته وسجل التدقيق.', `${button('تحديث البيانات', 'button secondary', 'refresh-data', 'refresh')}`)}
     ${renderStatusBanner()}
-    <div class="stat-grid ops-stats">${renderStat('اتصال الجسر', bridgeStatus().text, telemetry?.configured ? 'مفتاح HMAC على الخادم' : 'إعداد الجسر مطلوب', 'link', bridgeConfigured ? 'green' : 'orange')}${renderStat('البوتات / المحطات', deviceValue, liveHeartbeats ? `${overview.devices.online} متصل · ${overview.devices.offline} دون نبض حديث` : 'لن تظهر أرقام حتى وصول heartbeat موثّق', 'layers', liveHeartbeats ? 'blue' : 'orange')}${renderStat('كتالوج الأوامر', commandValue, commandStatus.text, 'terminal', state.commands.length ? 'purple' : 'orange')}${renderStat('طلبات HMAC', requestValue, overview?.requests?.total ? `${overview.requests.verified} موثّق · ${overview.requests.rejected} مرفوض` : 'السجل فارغ منذ تشغيل العملية', 'shield', overview?.requests?.total ? 'green' : 'blue')}</div>
-    <div class="ops-layout"><section class="panel ops-panel command-panel">${renderCommandForm(true)}</section><section class="panel ops-panel"><div class="panel-head"><div><h2>أوامر الخدمات المعرّفة</h2><p>لا تظهر إجراءات تشغيل/إيقاف/إعادة تشغيل إلا إذا عرّفها المشغّل في قائمة الخادم.</p></div><span class="panel-icon">${icon('cpu', 18)}</span></div><div class="service-actions">${commandActions.length ? commandActions.map((command) => `<button class="service-action-card" data-select-command="${escapeHtml(command.id)}"><span class="action-symbol">${icon(command.serviceAction.operation === 'stop' ? 'stop' : command.serviceAction.operation === 'start' ? 'play' : 'refresh', 16)}</span><span><strong>${escapeHtml(command.serviceAction.service)}</strong><small>${escapeHtml(actionLabel[command.serviceAction.operation] || 'إجراء خدمة')} · ${escapeHtml(command.title)}</small></span>${icon('arrow', 16)}</button>`).join('') : `<div class="empty-state compact">${icon('layers', 25)}<h3>لا توجد إجراءات خدمة مهيأة</h3><p>أضف فقط إجراءات موثوقة إلى commands.json على الخادم؛ لن يتم اختراع أوامر هنا.</p></div>`}</div><div class="panel-footnote">كل تنفيذ خدمة يتطلب تأكيدًا صريحًا قبل الإرسال، ويتحقق الخادم من هوية الأمر وقائمة السماح.</div></section></div>
-    <div class="ops-layout secondary-layout"><section class="panel ops-panel"><div class="panel-head"><div><h2>البوتات والطبقات</h2><p>تعرض المحطات التي وصلت عبر heartbeat موقّع فقط.</p></div>${button('عرض الكل', 'text-button', 'go-devices', 'arrow')}</div>${recentDevices.length ? `<div class="device-list">${recentDevices.map((device) => `<div class="device-row"><span class="device-glyph">${icon('cpu', 16)}</span><span class="device-copy"><strong>${escapeHtml(device.name || device.id)}</strong><small><code>${escapeHtml(device.id)}</code> · ${escapeHtml(device.region || 'منطقة غير محددة')}</small></span>${statusPill(device.status, statusLabel[device.status] || device.status)}<small class="device-seen">${escapeHtml(relativeTime(device.lastSeen))}</small></div>`).join('')}</div>` : `<div class="empty-state compact">${icon('activity', 25)}<h3>بانتظار أول heartbeat</h3><p>تأكد من إعداد مفتاح HMAC ثم وصل الجسر إلى /api/terminal/heartbeat.</p></div>`}</section><section class="panel ops-panel"><div class="panel-head"><div><h2>آخر عمليات التنفيذ</h2><p>تدقيق داخلي لآخر 100 تنفيذ في ذاكرة هذه العملية.</p></div>${button('فتح السجل', 'text-button', 'go-executions', 'arrow')}</div>${state.executions.length ? `<div class="mini-execution-list">${state.executions.slice(0, 4).map(renderExecutionRow).join('')}</div>` : `<div class="empty-state compact">${icon('terminal', 25)}<h3>لا يوجد تنفيذ مسجل</h3><p>سيظهر هنا الأمر المختار ونتيجته بعد الإرسال.</p></div>`}</section></div>
-    ${state.commandResult ? renderCommandResult() : ''}`;
+    <div class="workbench-grid">
+      <section class="panel ops-panel command-panel workbench-main">${renderCommandForm(true)}</section>
+      <div class="workbench-side">
+        <section class="panel ops-panel runtime-panel"><div class="panel-head"><div><h2>حالة المصدر</h2><p>معلومات حية من واجهات NEXORA المحمية.</p></div><span class="panel-icon">${icon('activity', 18)}</span></div><div class="runtime-state-list"><div class="runtime-state-row"><span>واجهة التحكم</span><strong class="${state.live ? 'tone-ok' : 'tone-warn'}">${escapeHtml(apiText)}</strong></div><div class="runtime-state-row"><span>قائمة الأوامر</span><strong class="${state.commands.length ? 'tone-ok' : 'tone-warn'}">${escapeHtml(commandCatalogStatus().text)}</strong></div><div class="runtime-state-row"><span>نبض الجسر</span><strong>${escapeHtml(heartbeatText)}</strong></div><div class="runtime-state-row"><span>آخر مزامنة</span><strong>${state.lastSync ? escapeHtml(fmtDate(state.lastSync)) : 'بانتظار مصدر'}</strong></div></div><div class="provider-status"><div class="provider-status-head"><strong>OpenRouter · اختياري</strong><span class="mini-status ${state.openRouterStatus?.configured ? 'online' : 'warning'}">${escapeHtml(openRouterState)}</span></div><div class="provider-status-row"><span>الطراز المحدد</span><code>${escapeHtml(openRouterModel)}</code></div><div class="provider-status-row"><span>آخر اختبار</span><strong>${escapeHtml(openRouterTest)}</strong></div>${state.openRouterStatus?.lastTest?.testedAt ? `<small class="provider-test-time">${escapeHtml(fmtDate(state.openRouterStatus.lastTest.testedAt))}</small>` : ''}<small class="provider-note">حالة قراءة فقط من الخادم؛ لا يُرسل مفتاح أو طلب إلى OpenRouter من هذه اللوحة.</small></div><div class="panel-footnote">لا تُعرض خدمة أو أمر أو حالة إلا إذا أعادها المصدر المتصل.</div></section>
+        <section class="panel ops-panel service-panel"><div class="panel-head"><div><h2>إجراءات الخدمات المسموحة</h2><p>تظهر فقط إذا وردت كإجراءات فعلية في الكتالوج.</p></div><span class="panel-icon">${icon('shield', 18)}</span></div><div class="service-actions">${serviceCommands.length ? serviceCommands.map((command) => `<button class="service-action-card" data-select-command="${escapeHtml(command.id)}"><span class="action-symbol">${icon(command.serviceAction.operation === 'stop' ? 'stop' : command.serviceAction.operation === 'start' ? 'play' : 'refresh', 16)}</span><span><strong>${escapeHtml(command.serviceAction.service)}</strong><small>${escapeHtml(actionLabel[command.serviceAction.operation])} · ${escapeHtml(command.title)}</small></span>${icon('arrow', 16)}</button>`).join('') : `<div class="empty-state compact">${icon('layers', 25)}<h3>لا توجد إجراءات مهيأة</h3><p>لا توجد حاليًا إجراءات خدمة مسموحة في مصدر الأوامر.</p></div>`}</div><div class="panel-footnote">يتطلب كل إجراء خدمة مراجعة وتأكيدًا مستقلًا قبل إرساله.</div></section>
+      </div>
+    </div>
+    ${renderCommandResult()}
+    <section class="panel ops-panel audit-preview"><div class="panel-head"><div><h2>آخر عمليات التنفيذ</h2><p>سجل التدقيق الذي أعاده الخادم؛ لا تُعرض مدخلات أو سجلات تجريبية.</p></div>${button('فتح سجل التنفيذ', 'text-button', 'go-executions', 'arrow')}</div>${state.executions.length ? `<div class="mini-execution-list">${state.executions.slice(0, 5).map(renderExecutionRow).join('')}</div>` : `<div class="empty-state compact">${icon('terminal', 25)}<h3>لا يوجد سجل تنفيذ بعد</h3><p>ستظهر هنا المحاولات المسجلة من واجهة الخادم بعد تشغيل أمر مسموح.</p></div>`}</section>`;
 }
 function commandInputFields(command) {
-  return (command?.inputs || []).map((field) => `<label class="command-field"><span>${escapeHtml(field.name)}</span>${/prompt|message|text|query/i.test(field.name) ? `<textarea data-command-arg="${escapeHtml(field.name)}" rows="3" placeholder="${escapeHtml(field.example || 'أدخل القيمة المطلوبة لهذا الأمر فقط')}"></textarea>` : `<input data-command-arg="${escapeHtml(field.name)}" type="text" placeholder="${escapeHtml(field.example || 'قيمة وسيطة للأمر المحدد')}">`}</label>`).join('');
+  return (command?.inputs || []).map((field) => `<label class="command-field"><span><code>${escapeHtml(field.name)}</code></span>${/prompt|message|text|query/i.test(field.name) ? `<textarea data-command-arg="${escapeHtml(field.name)}" aria-label="مدخل ${escapeHtml(field.name)}" rows="3" autocomplete="off"></textarea>` : `<input data-command-arg="${escapeHtml(field.name)}" aria-label="مدخل ${escapeHtml(field.name)}" type="text" autocomplete="off">`}</label>`).join('');
 }
 function renderCommandForm(compact = false) {
-  const title = compact ? 'جسر Linux · تنفيذ آمن' : 'تشغيل أمر من القائمة المسموحة';
-  const description = compact ? 'الواجهة لا ترسل نص shell. الخادم يختار التنفيذ من commands.json فقط.' : 'اختر عنصرًا مهيأً على الخادم؛ المدخلات ترتبط بعناصر القائمة ولا تتحول إلى أمر shell حر.';
-  if (state.commandError) return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div></div><div class="empty-state compact"><h3>تعذر تحميل كتالوج الخادم</h3><p>${escapeHtml(state.commandError)}</p></div>`;
-  if (!state.commandsConfigured) return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div></div><div class="empty-state compact"><span class="unconfigured-chip">غير مهيأ</span><h3>ملف commands.json غير موجود أو غير صالح</h3><p>لا يمكن تشغيل أي شيء قبل أن يوفّر المشغّل قائمة أوامر صحيحة على الخادم.</p></div>`;
-  if (!state.commands.length) return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div></div><div class="empty-state compact"><span class="unconfigured-chip">قائمة فارغة</span><h3>لا يوجد أمر مسموح للتشغيل</h3><p>لم يُنفّذ أي أمر؛ أضف فقط الأوامر المعتمدة إلى ملف الخادم.</p></div>`;
+  const title = compact ? 'منفذ الأوامر' : 'تشغيل من قائمة الخادم';
+  const description = 'الأوامر ومدخلاتها تأتي من واجهة الكتالوج المحمية؛ لا يوجد إدخال shell حر.';
+  if (state.commandError) return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div><span class="unconfigured-chip">المصدر غير متاح</span></div><div class="empty-state compact"><h3>تعذر قراءة قائمة الخادم</h3><p>${escapeHtml(state.commandError)}</p></div>`;
+  if (!state.commandsConfigured) {
+    const stateText = state.commandsReason === 'invalid' ? 'قائمة الخادم غير صالحة' : 'غير مهيأ';
+    return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div><span class="unconfigured-chip">${escapeHtml(stateText)}</span></div><div class="empty-state compact"><span class="unconfigured-chip">${escapeHtml(stateText)}</span><h3>لا توجد قائمة أوامر موثقة متاحة</h3><p>لم يُنفّذ أي أمر. يلزم إعداد مصدر أوامر صالح على الخادم قبل إتاحة التشغيل.</p></div>`;
+  }
+  if (!state.commands.length) return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div><span class="unconfigured-chip">الكتالوج فارغ</span></div><div class="empty-state compact"><span class="unconfigured-chip">لا أوامر مسموحة</span><h3>لا يوجد أمر متاح للتشغيل</h3><p>أعاد الخادم كتالوجًا فارغًا؛ لم يُرسل أي تنفيذ.</p></div>`;
   const selected = state.commands.find((command) => command.id === state.selectedCommandId) || state.commands[0];
   const options = state.commands.map((command) => `<option value="${escapeHtml(command.id)}" ${command.id === selected.id ? 'selected' : ''}>${escapeHtml(command.title)}${command.serviceAction ? ` · ${escapeHtml(actionLabel[command.serviceAction.operation])} ${escapeHtml(command.serviceAction.service)}` : ''}</option>`).join('');
-  const runLabel = selected.serviceAction ? `${actionLabel[selected.serviceAction.operation] || 'تنفيذ'} الخدمة` : 'تشغيل الأمر المختار';
-  return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div><span class="mini-status online">${state.commands.length} مُدرج</span></div><div class="command-console"><label class="command-select-label" for="command-select">الأمر المتاح</label><select id="command-select">${options}</select><div class="command-description"><strong>${escapeHtml(selected.title)}</strong><p>${escapeHtml(selected.description || 'لا يوجد وصف لهذا الأمر.')}</p>${selected.serviceAction ? `<span class="service-meta">${escapeHtml(actionLabel[selected.serviceAction.operation])} · ${escapeHtml(selected.serviceAction.service)}</span>` : ''}</div><div class="command-fields">${commandInputFields(selected) || '<p class="no-args">هذا الأمر لا يتطلب مدخلات.</p>'}</div><button type="button" class="button primary run-button" data-action="run-selected">${icon(selected.serviceAction ? 'shield' : 'play', 16)}<span>${escapeHtml(runLabel)}</span></button><p class="command-safety-note">${selected.serviceAction ? 'سيفتح تأكيد واضح للعملية قبل إرسالها إلى الخادم.' : 'التنفيذ متاح فقط لهذا المعرّف المسجّل على الخادم.'} لا يتم إرسال CONTROL_API_KEY إلى المتصفح.</p></div>`;
+  const runLabel = selected.serviceAction ? 'مراجعة إجراء الخدمة' : 'تنفيذ الأمر المسموح';
+  return `<div class="panel-head"><div><h2>${title}</h2><p>${description}</p></div><span class="mini-status online">${state.commands.length} من الخادم</span></div><div class="command-console"><label class="command-select-label" for="command-select">الأمر المسموح</label><select id="command-select" ${state.executing ? 'disabled' : ''}>${options}</select><div class="command-description"><div class="command-title-row"><strong>${escapeHtml(selected.title)}</strong><code>${escapeHtml(selected.id)}</code></div><p>${escapeHtml(selected.description || 'لا يوجد وصف وارد من الخادم.')}</p>${selected.serviceAction ? `<span class="service-meta">${escapeHtml(actionLabel[selected.serviceAction.operation])} · ${escapeHtml(selected.serviceAction.service)}</span>` : ''}</div><div class="command-arguments-head"><strong>المدخلات</strong><small>تعريفها من الأمر المحدد في المصدر</small></div><div class="command-fields">${commandInputFields(selected) || '<p class="no-args">هذا الأمر لا يطلب مدخلات.</p>'}</div><button type="button" class="button primary run-button" data-action="run-selected" ${state.executing ? 'disabled' : ''}>${icon(selected.serviceAction ? 'shield' : 'play', 16)}<span>${state.executing ? 'جارٍ تنفيذ الطلب…' : escapeHtml(runLabel)}</span></button><p class="command-safety-note">${selected.serviceAction ? 'يتطلب الإجراء مراجعة وتأكيدًا منفصلًا قبل الإرسال.' : 'يُرسل معرّف الأمر ومدخلاته فقط إلى واجهة التنفيذ المحمية.'} لا يُرسل مفتاح الإدارة إلى المتصفح.</p></div>`;
 }
 function renderCommandResult() {
   const result = state.commandResult;
-  if (!result) return '';
-  return `<section class="panel command-result"><div class="panel-head"><div><h2>نتيجة التنفيذ</h2><p>${escapeHtml(result.title || result.commandId)} · ${escapeHtml(fmtDate(result.executedAt || new Date().toISOString()))}</p></div>${statusPill(result.ok ? 'success' : 'failed', result.ok ? 'اكتمل' : 'لم يكتمل')}</div><div class="result-meta"><span>الحالة: ${escapeHtml(result.code ?? 'غير متاح')}</span><span>المدة: ${escapeHtml(result.durationMs ?? 0)} ms</span>${result.service ? `<span>${escapeHtml(actionLabel[result.operation] || result.operation)} · ${escapeHtml(result.service)}</span>` : ''}</div><div class="result-output"><strong>stdout</strong><pre>${escapeHtml(result.stdout || '—')}</pre>${result.stderr ? `<strong>stderr</strong><pre class="stderr">${escapeHtml(result.stderr)}</pre>` : ''}</div></section>`;
+  const status = state.executing ? 'جارٍ التنفيذ' : state.executionStatus === 'review' ? 'بانتظار التأكيد' : state.executionStatus === 'cancelled' ? 'أُلغي قبل التنفيذ' : result ? result.ok ? 'اكتمل' : 'لم يكتمل' : 'بانتظار التنفيذ';
+  const statusClass = state.executing ? 'running' : result?.ok ? 'success' : result ? 'failed' : state.executionStatus === 'review' ? 'review' : 'idle';
+  const pendingText = state.executing ? 'أُرسل طلب التنفيذ إلى الخادم الموثق.' : state.executionStatus === 'review' ? 'راجع تفاصيل إجراء الخدمة في نافذة التأكيد قبل المتابعة.' : state.executionStatus === 'cancelled' ? 'أُلغي الإجراء قبل تأكيده؛ لم يبدأ تنفيذ الخدمة.' : state.commandError ? 'المخرجات غير متاحة لأن مصدر الأوامر لا يستجيب.' : !state.commandsConfigured || !state.commands.length ? 'بانتظار مصدر أوامر صالح؛ لم يُرسل أي أمر.' : 'لم يبدأ تنفيذ في هذه الجلسة بعد.';
+  const output = result ? `${result.stdout ? `<strong>stdout</strong><pre>${escapeHtml(result.stdout)}</pre>` : ''}${result.stderr ? `<strong class="stderr-label">stderr</strong><pre class="stderr">${escapeHtml(result.stderr)}</pre>` : ''}${result.error ? `<strong class="stderr-label">رسالة الخادم</strong><pre class="stderr">${escapeHtml(result.error)}</pre>` : ''}${!result.stdout && !result.stderr && !result.error ? '<div class="result-no-output">لم يُرجع التنفيذ مخرجات نصية.</div>' : ''}` : '';
+  return `<section class="panel command-result"><div class="panel-head result-heading"><div><h2>حالة التنفيذ والمخرجات</h2><p>${result ? `${escapeHtml(result.title || result.commandId)} · ${escapeHtml(fmtDate(result.executedAt))}` : 'تظهر النتيجة بعد استجابة واجهة الخادم فقط.'}</p></div><div class="result-heading-actions"><span class="execution-state-pill ${statusClass}">${escapeHtml(status)}</span>${button('مسح العرض', 'button secondary', 'clear-result', 'close')}${result && (result.stdout || result.stderr) ? button('نسخ المخرجات', 'button secondary', 'copy-output', 'copy') : ''}</div></div><div class="execution-state-row ${statusClass}"><span class="execution-state-indicator"></span><div><strong>${escapeHtml(status)}</strong><p>${escapeHtml(result?.error || pendingText)}</p></div></div>${result ? `<div class="result-meta">${result.code !== undefined && result.code !== null ? `<span>رمز الخروج: <code>${escapeHtml(result.code)}</code></span>` : ''}${Number.isFinite(result.durationMs) ? `<span>المدة: <code>${escapeHtml(result.durationMs)} ms</code></span>` : ''}${result.service ? `<span>${escapeHtml(actionLabel[result.operation] || result.operation)} · ${escapeHtml(result.service)}</span>` : ''}</div><div class="result-output">${output}</div>` : `<div class="result-empty">${icon(state.commandsConfigured && state.commands.length ? 'terminal' : 'alert', 22)}<span>${escapeHtml(pendingText)}</span></div>`}</section>`;
 }
 function renderCommandCatalog() {
-  return `${sectionTitle('العمليات / قائمة الخادم', 'كتالوج الأوامر', 'هذه القائمة تأتي من commands.json على الخادم. لا توجد خانة shell خام ولا يتم إنشاء أوامر تلقائيًا.', `${button('إعادة تحميل', 'button secondary', 'refresh-data', 'refresh')}`)}<section class="panel ops-panel command-page">${renderCommandForm(false)}${state.commandResult ? renderCommandResult() : ''}</section><div class="ops-banner info"><div class="ops-banner-icon">${icon('shield', 19)}</div><div class="ops-banner-copy"><strong>حدّ الأمان</strong><p>كل طلب يتطلب جلسة المدير وcommandId موجودًا فعليًا في القائمة. الأسرار تبقى على الخادم، وتُعزل بيئة الأمر عن مفاتيح الإدارة وHMAC وRender.</p></div></div>`;
+  const cards = state.commands.map((command) => `<button type="button" class="catalog-command-card ${command.id === state.selectedCommandId ? 'selected' : ''}" data-select-command="${escapeHtml(command.id)}"><span class="catalog-card-top"><strong>${escapeHtml(command.title)}</strong><code>${escapeHtml(command.id)}</code></span><span class="catalog-card-description">${escapeHtml(command.description || 'لا يوجد وصف وارد من الخادم.')}</span><span class="catalog-card-meta">${(command.inputs || []).length ? `${(command.inputs || []).length} مدخلات من تعريف الأمر` : 'لا يتطلب مدخلات'}${command.serviceAction ? ` · ${escapeHtml(actionLabel[command.serviceAction.operation])} ${escapeHtml(command.serviceAction.service)}` : ''}</span></button>`).join('');
+  return `${sectionTitle('العمليات / مصدر الخادم', 'كتالوج الأوامر', 'العناصر التالية تُعرض كما أعادتها واجهة /api/commands بعد التحقق من جلسة الإدارة؛ لا توجد أوامر محلية تجريبية.', `${button('إعادة تحميل المصدر', 'button secondary', 'refresh-data', 'refresh')}`)}${cards ? `<section class="command-catalog-list" aria-label="قائمة الأوامر الفعلية">${cards}</section>` : ''}<section class="panel ops-panel command-page">${renderCommandForm(false)}</section>${renderCommandResult()}<div class="ops-banner info"><div class="ops-banner-icon">${icon('shield', 19)}</div><div class="ops-banner-copy"><strong>حدود التنفيذ</strong><p>كل طلب يتطلب جلسة المدير ومعرّفًا موجودًا فعليًا في قائمة الخادم. لا يقبل هذا المركز نص shell حرًا، ولا يرسل مفاتيح الإدارة إلى المتصفح.</p></div></div>`;
 }
 function renderDevices() {
   const filtered = state.stations.filter((device) => (state.deviceFilter === 'all' || device.status === state.deviceFilter) && `${device.id} ${device.name || ''} ${device.region || ''}`.toLowerCase().includes(state.search.toLowerCase()));
@@ -248,7 +265,8 @@ function renderDevices() {
 function renderExecutionRow(entry) {
   const label = executionLabel[entry.status] || entry.status || 'غير معروف';
   const operation = entry.operation && entry.operation !== 'command' ? `${actionLabel[entry.operation] || entry.operation}${entry.service ? ` · ${entry.service}` : ''}` : 'أمر مسموح';
-  return `<div class="execution-row"><span class="execution-mark ${entry.status === 'success' ? 'ok' : entry.status === 'confirmation_required' ? 'wait' : 'bad'}">${icon(entry.status === 'success' ? 'check' : entry.status === 'confirmation_required' ? 'shield' : 'alert', 15)}</span><div class="execution-copy"><strong>${escapeHtml(entry.title || entry.commandId || 'أمر')}</strong><small><code>${escapeHtml(entry.commandId || '—')}</code> · ${escapeHtml(operation)}</small></div><span class="execution-status ${entry.status === 'success' ? 'ok' : ''}">${escapeHtml(label)}</span><time>${escapeHtml(fmtDate(entry.time))}</time></div>`;
+  const duration = Number.isFinite(entry.durationMs) ? ` · ${entry.durationMs} ms` : '';
+  return `<div class="execution-row"><span class="execution-mark ${entry.status === 'success' ? 'ok' : entry.status === 'confirmation_required' ? 'wait' : 'bad'}">${icon(entry.status === 'success' ? 'check' : entry.status === 'confirmation_required' ? 'shield' : 'alert', 15)}</span><div class="execution-copy"><strong>${escapeHtml(entry.title || entry.commandId || 'أمر')}</strong><small><code>${escapeHtml(entry.commandId || '—')}</code> · ${escapeHtml(operation)}${duration}</small></div><span class="execution-status ${entry.status === 'success' ? 'ok' : ''}">${escapeHtml(label)}</span><time>${escapeHtml(fmtDate(entry.time))}</time></div>`;
 }
 function renderExecutions() {
   return `${sectionTitle('السجلات / تدقيق العمليات', 'سجل التنفيذ', 'سجل داخلي محدود لآخر 100 محاولة تشغيل. لا يسجل قيم المدخلات؛ السجل يمسح عند إعادة تشغيل العملية.', `${button('تحديث', 'button secondary', 'refresh-data', 'refresh')}`)}<section class="panel ops-panel full-panel">${state.executions.length ? `<div class="execution-list">${state.executions.map(renderExecutionRow).join('')}</div>` : `<div class="empty-state">${icon('terminal', 28)}<h3>لا يوجد سجل تنفيذ بعد</h3><p>سيتم تدوين الأمر المختار وحالته ومدة التنفيذ عند استدعائه.</p></div>`}</section>`;
@@ -348,28 +366,40 @@ function collectCommandArgs() {
   return args;
 }
 async function executeCommand(commandId, args = {}, confirmed = false) {
+  if (state.executing) return;
   const command = state.commands.find((item) => item.id === commandId);
   if (!command) return showToast('الأمر غير موجود في القائمة الحالية');
   if (command.serviceAction && !confirmed) {
+    state.commandResult = null;
+    state.executionStatus = 'review';
     state.modal = { type: 'confirm-run', commandId, args };
     render();
     return;
   }
   state.modal = null;
   state.commandResult = null;
+  state.executionStatus = 'running';
+  state.executing = true;
   render();
   try {
     const response = await apiRequest('/api/run', { method: 'POST', body: JSON.stringify({ commandId, args, ...(confirmed ? { confirmedCommandId: commandId } : {}) }) });
     state.commandResult = { ...response, executedAt: new Date().toISOString() };
+    state.executionStatus = response.ok ? 'success' : 'failed';
+    state.executing = false;
     await loadLiveData();
     showToast(response.ok ? 'اكتمل التنفيذ' : 'انتهى التنفيذ بحالة غير ناجحة؛ راجع النتيجة والسجل');
   } catch (error) {
     if (error.status === 428 && error.body?.confirmationRequired) {
+      state.executing = false;
+      state.executionStatus = 'review';
       state.modal = { type: 'confirm-run', commandId, args };
+      await loadLiveData();
       render();
       return;
     }
-    state.commandResult = { commandId, title: command.title, ok: false, stderr: error.message, code: `HTTP ${error.status || '?'}`, executedAt: new Date().toISOString() };
+    state.executing = false;
+    state.executionStatus = 'failed';
+    state.commandResult = { commandId, title: command.title, ok: false, error: error.message, code: `HTTP ${error.status || '?'}`, executedAt: new Date().toISOString() };
     await loadLiveData();
     showToast(error.message);
   }
@@ -398,11 +428,18 @@ function showToast(message) {
 function handleAction(action) {
   if (action === 'toggle-menu') { state.menuOpen = !state.menuOpen; render(); }
   else if (action === 'close-menu') { state.menuOpen = false; render(); }
-  else if (action === 'close-modal') { state.modal = null; render(); }
+  else if (action === 'close-modal') { if (state.modal?.type === 'confirm-run') state.executionStatus = 'cancelled'; state.modal = null; render(); }
   else if (action === 'refresh-data') loadLiveData();
   else if (action === 'refresh-render') loadRenderServices();
   else if (action === 'go-devices') { state.section = 'devices'; render(); }
   else if (action === 'go-executions') { state.section = 'executions'; render(); }
+  else if (action === 'clear-result') { state.commandResult = null; state.executionStatus = 'idle'; render(); }
+  else if (action === 'copy-output') {
+    const text = [state.commandResult?.stdout, state.commandResult?.stderr].filter(Boolean).join('\n\n');
+    if (!text) return showToast('لا توجد مخرجات لنسخها');
+    if (!navigator.clipboard?.writeText) return showToast('الحافظة غير متاحة في هذا السياق');
+    navigator.clipboard.writeText(text).then(() => showToast('نُسخت المخرجات')).catch(() => showToast('تعذر نسخ المخرجات'));
+  }
   else if (action === 'run-selected') executeCommand(state.selectedCommandId, collectCommandArgs(), false);
   else if (action === 'confirm-run') { const modal = state.modal; if (modal?.commandId) executeCommand(modal.commandId, modal.args || {}, true); }
   else if (action === 'create-key') { state.modal = { type: 'create-key' }; render(); }
