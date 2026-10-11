@@ -56,6 +56,9 @@ const state = {
   manusPrompt: '', manusTaskBusy: false, manusTaskError: '', manusTaskResult: readLastManusTask(),
   manusProgressBusy: false, manusProgressError: '', manusTaskProgress: null,
 };
+let manusEventSource = null;
+let manusEventSourceTaskId = '';
+let manusAutoRefreshPending = false;
 
 function escapeHtml(value) {
   return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#039;' }[char]));
@@ -313,7 +316,7 @@ function renderManusProgress() {
     ? `<div class="manus-waiting-note"><strong>يتطلب تدخل المستخدم في Manus</strong><p>${['messageAskUser', 'cascadeAskUser'].includes(waitingType) ? 'تحتاج المهمة إلى رد منك. افتحها في Manus للمتابعة؛ لا يرسل المركز ردودًا نيابةً عنك.' : 'قد تكون هذه مصادقة إجراء أو نوع حدث غير مدعوم. افتح المهمة في Manus واتخذ الإجراء بنفسك؛ لا يؤكد المركز أي إجراء تلقائيًا.'}</p>${waitingType ? `<small>نوع الحدث: <code>${escapeHtml(waitingType)}</code></small>` : ''}${progress.waiting?.description ? `<p>${escapeHtml(progress.waiting.description)}</p>` : ''}</div>`
     : '';
   const messages = progress.messages?.length ? progress.messages.map((message) => `<article class="manus-message"><div><strong>${escapeHtml(({ user_message: 'رسالة المستخدم', assistant_message: 'رسالة Manus', error_message: 'تفاصيل الخطأ', status_update: 'تحديث الحالة', user_stop: 'إيقاف', structured_output_result: 'النتيجة' })[message.type] || 'رسالة')}</strong><time>${escapeHtml(fmtDate(message.timestamp))}</time></div><p>${escapeHtml(message.content)}</p></article>`).join('') : '<p class="manus-empty-messages">لا توجد رسائل متاحة لهذه المهمة حتى الآن.</p>';
-  return `<section class="panel ops-panel manus-progress"><div class="panel-head"><div><h2>الحالة والرسائل</h2><p>مهمة NEXORA الأخيرة فقط · لا توجد قائمة مهام للحساب.</p></div><span class="manus-status-pill ${stateClass}">${escapeHtml(statusLabels[progress.agentStatus] || statusLabels.unknown)}</span></div>${completionNote ? `<p class="manus-completion-note">${escapeHtml(completionNote)}</p>` : ''}${waitingNote}<div class="manus-message-list">${messages}</div></section>`;
+  return `<section class="panel ops-panel manus-progress"><div class="panel-head"><div><h2>الحالة والرسائل</h2><p>مهمة NEXORA الأخيرة فقط · تحديثات فورية موقّعة.</p></div><span class="manus-status-pill ${stateClass}">${escapeHtml(statusLabels[progress.agentStatus] || statusLabels.unknown)}</span></div>${completionNote ? `<p class="manus-completion-note">${escapeHtml(completionNote)}</p>` : ''}${waitingNote}<div class="manus-message-list">${messages}</div></section>`;
 }
 function renderManus() {
   const result = state.manusTaskResult;
@@ -323,7 +326,7 @@ function renderManus() {
       <div class="manus-form"><label for="manus-task-message">نص المهمة</label><textarea id="manus-task-message" maxlength="10000" rows="8" placeholder="اكتب ما تريد من Manus إنجازه…" ${state.manusTaskBusy ? 'disabled' : ''}>${escapeHtml(state.manusPrompt)}</textarea><div class="manus-form-meta"><span>حتى 10,000 حرف · لا مرفقات أو إعدادات إضافية</span><span>${state.manusPrompt.length.toLocaleString('ar-JO')} / 10,000</span></div>
         ${state.manusTaskError ? `<p class="manus-error" role="alert">${escapeHtml(state.manusTaskError)}</p>` : ''}
         <button type="button" id="submit-manus-task" class="button primary manus-submit" data-action="submit-manus-task" ${state.manusTaskBusy ? 'disabled' : ''}>${icon('play',16)}<span>${state.manusTaskBusy ? 'جارٍ إرسال المهمة…' : 'إرسال المهمة إلى Manus'}</span></button>
-        <p class="manus-safety-note">لن يبدأ أي طلب قبل الضغط على هذا الزر. تُفرض الخصوصية على الخادم، ولا تُستخدم موصلات حساب Manus الافتراضية. التحقق من التقدم يدوي، ولا يؤكد المركز أي إجراء مطلوب.</p></div></section>${taskDetails}`;
+        <p class="manus-safety-note">لن يبدأ أي طلب قبل الضغط على هذا الزر. تُفرض الخصوصية على الخادم، ولا تُستخدم موصلات حساب Manus الافتراضية. أحداث webhook لا ترسل سوى نوع الحدث ومعرّف المهمة؛ ولا يؤكد المركز أي إجراء مطلوب.</p></div></section>${taskDetails}`;
 }
 function renderIntegration() {
   const telem = state.overview?.telemetry;
@@ -373,6 +376,7 @@ function render() {
   bindEvents();
 }
 function bindEvents() {
+  syncManusTaskEventStream();
   document.querySelectorAll('[data-section]').forEach((element) => element.addEventListener('click', () => {
     state.section = element.dataset.section;
     state.search = '';
@@ -402,6 +406,32 @@ function bindEvents() {
     const counter = document.querySelector('.manus-form-meta span:last-child');
     if (counter) counter.textContent = `${state.manusPrompt.length.toLocaleString('ar-JO')} / 10,000`;
   });
+}
+function syncManusTaskEventStream() {
+  const task = state.manusTaskResult;
+  if (state.section !== 'manus' || !task?.taskId || !task?.taskReceipt || typeof window.EventSource !== 'function') {
+    manusEventSource?.close();
+    manusEventSource = null;
+    manusEventSourceTaskId = '';
+    return;
+  }
+  if (manusEventSource && manusEventSourceTaskId === task.taskId) return;
+  manusEventSource?.close();
+  const source = new window.EventSource(`/api/control/manus/tasks/${encodeURIComponent(task.taskId)}/events`, { withCredentials: true });
+  manusEventSource = source;
+  manusEventSourceTaskId = task.taskId;
+  source.addEventListener('manus-task-update', (event) => {
+    let update;
+    try { update = JSON.parse(event.data); } catch { return; }
+    if (update?.taskId !== state.manusTaskResult?.taskId || !['task_created', 'task_stopped'].includes(update?.eventType)) return;
+    refreshManusTask(true);
+  });
+  source.onerror = () => {
+    if (source.readyState === window.EventSource.CLOSED) {
+      source.close();
+      if (manusEventSource === source) { manusEventSource = null; manusEventSourceTaskId = ''; }
+    }
+  };
 }
 function collectCommandArgs() {
   const args = {};
@@ -489,9 +519,10 @@ async function submitManusTask() {
     render();
   }
 }
-async function refreshManusTask() {
+async function refreshManusTask(fromWebhook = false) {
   const result = state.manusTaskResult;
-  if (state.manusProgressBusy || !result?.taskId || !result?.taskReceipt) return;
+  if (state.manusProgressBusy) { if (fromWebhook) manusAutoRefreshPending = true; return; }
+  if (!result?.taskId || !result?.taskReceipt) return;
   state.manusProgressBusy = true;
   state.manusProgressError = '';
   render();
@@ -501,7 +532,10 @@ async function refreshManusTask() {
     state.manusProgressError = error.message || 'تعذر التحقق من الحالة. أعد المحاولة لاحقًا.';
   } finally {
     state.manusProgressBusy = false;
+    const refreshPending = manusAutoRefreshPending;
+    manusAutoRefreshPending = false;
     render();
+    if (refreshPending && state.section === 'manus') refreshManusTask(true);
   }
 }
 async function disableKey(id) {

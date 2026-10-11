@@ -6,6 +6,12 @@ globalThis.fetch = async (input, init = {}) => {
     const key = new Headers(init.headers).get("x-manus-api-key");
     if (!key || key !== process.env.MANUS_API_KEY) return new Response(JSON.stringify({ ok: false, error: { message: "mock authentication rejected" } }), { status: 401 });
 
+    if (url.pathname === "/v2/webhook.publicKey" && init.method === "GET") {
+      const publicKey = process.env.MOCK_MANUS_WEBHOOK_PUBLIC_KEY;
+      if (!publicKey) return new Response(JSON.stringify({ ok: false, error: { message: "mock key unavailable" } }), { status: 503 });
+      return new Response(JSON.stringify({ ok: true, public_key: publicKey, algorithm: "RSA-SHA256" }), { status: 200, headers: { "content-type": "application/json" } });
+    }
+
     if (url.pathname === "/v2/task.create" && init.method === "POST") {
       let requestBody;
       try { requestBody = JSON.parse(init.body || "{}"); } catch { return new Response("{}", { status: 400 }); }

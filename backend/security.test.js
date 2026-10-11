@@ -7,11 +7,20 @@ import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
 import { createManusTask, getManusTaskProgress, MANUS_TASK_CREATE_URL, MANUS_TASK_MESSAGES_URL, MANUS_TASK_DETAIL_URL } from './manus-api.js';
+import { MANUS_WEBHOOK_PUBLIC_KEY_URL, MANUS_WEBHOOK_URL, resetManusWebhookPublicKeyCache, verifyManusWebhook } from './manus-webhook.js';
 
 const adminSecret = `test-only-${'x'.repeat(48)}`;
 const hmacSecret = 'local-test-hmac-secret-never-used-outside-this-test';
 const bridgeSecret = 'test-only-bridge-hmac-secret-never-used-outside-this-test';
 const manusTestSecret = 'test-mock-manus-key-blocked-from-network';
+const mockWebhookKeyPair = crypto.generateKeyPairSync('rsa', { modulusLength: 2048 });
+const mockWebhookPublicKeyPem = mockWebhookKeyPair.publicKey.export({ type: 'spki', format: 'pem' });
+function signedWebhookBody(body, timestamp = String(Math.floor(Date.now() / 1000))) {
+  const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(typeof body === 'string' ? body : JSON.stringify(body));
+  const digest = crypto.createHash('sha256').update(rawBody).digest('hex');
+  const signature = crypto.sign('RSA-SHA256', Buffer.from(`${timestamp}.${MANUS_WEBHOOK_URL}.${digest}`), mockWebhookKeyPair.privateKey).toString('base64');
+  return { rawBody, timestamp, signature };
+}
 const actionCommandId = 'test_local_restart';
 let child;
 let base;
@@ -63,6 +72,7 @@ before(async () => {
       OPENROUTER_API_KEY: '',
       OPENROUTER_MODEL: '',
       MANUS_API_KEY: manusTestSecret,
+      MOCK_MANUS_WEBHOOK_PUBLIC_KEY: mockWebhookPublicKeyPem,
       NODE_OPTIONS: [process.env.NODE_OPTIONS, `--import=${new URL('./test-support/mock-manus-fetch.js', import.meta.url).href}`].filter(Boolean).join(' '),
     },
     stdio: 'ignore',
@@ -79,7 +89,7 @@ after(() => {
 });
 
 test('all management, command, and GitHub routes reject unauthenticated requests', async () => {
-  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/control/openrouter/status', '/api/commands', '/api/render/services']) {
+  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/control/openrouter/status', '/api/commands', '/api/render/services', '/api/control/manus/tasks/task_mock_route_123/events']) {
     assert.equal((await fetch(`${base}${pathName}`)).status, 401, pathName);
   }
   for (const pathName of ['/api/run', '/api/control/manus/tasks', '/api/control/manus/tasks/progress', '/api/github/push', '/api/github/create-repo', '/api/github/connect', '/api/github/sync-commands']) {
@@ -359,4 +369,138 @@ test('Manus error status and messages are normalized and redact the server API k
   assert.equal(result.agentStatus, 'error');
   assert.ok(result.messages.some((message) => message.content.includes('[مخفي]')));
   assert.doesNotMatch(JSON.stringify(result), new RegExp(testKey));
+});
+
+test('Manus webhook verifier validates RSA-SHA256 against raw bytes, enforces five minutes, and caches the public key', async () => {
+  resetManusWebhookPublicKeyCache();
+  let fetchCount = 0;
+  let captured;
+  const fetchImpl = async (url, options) => {
+    fetchCount++;
+    captured = { url, options };
+    return { ok: true, json: async () => ({ ok: true, public_key: mockWebhookPublicKeyPem, algorithm: 'RSA-SHA256' }) };
+  };
+  const now = Date.now();
+  const rawBody = Buffer.from('{"event_id":"evt_crypto_1","event_type":"test"}');
+  const timestamp = String(Math.floor(now / 1000));
+  const signed = signedWebhookBody(rawBody, timestamp);
+  const options = { signature: signed.signature, timestamp, rawBody, apiKey: manusTestSecret, fetchImpl, now };
+  assert.deepEqual(await verifyManusWebhook(options), { valid: true, reason: null });
+  assert.equal(captured.url, MANUS_WEBHOOK_PUBLIC_KEY_URL);
+  assert.equal(captured.options.method, 'GET');
+  assert.equal(captured.options.headers['x-manus-api-key'], manusTestSecret);
+  assert.equal(fetchCount, 1);
+  assert.deepEqual(await verifyManusWebhook({ ...options, now: now + 1_000 }), { valid: true, reason: null });
+  assert.equal(fetchCount, 1);
+
+  const modifiedBody = Buffer.concat([rawBody, Buffer.from(' ')]);
+  assert.deepEqual(await verifyManusWebhook({ ...options, rawBody: modifiedBody }), { valid: false, reason: 'invalid_signature' });
+  assert.deepEqual(await verifyManusWebhook({ ...options, signature: Buffer.alloc(256).toString('base64') }), { valid: false, reason: 'invalid_signature' });
+  const staleTimestamp = String(Math.floor(now / 1000) - 301);
+  const staleSigned = signedWebhookBody(rawBody, staleTimestamp);
+  assert.deepEqual(await verifyManusWebhook({ ...options, timestamp: staleTimestamp, signature: staleSigned.signature }), { valid: false, reason: 'stale_timestamp' });
+  assert.equal(fetchCount, 1);
+
+  const laterNow = now + 60 * 60 * 1000 + 1;
+  const laterTimestamp = String(Math.floor(laterNow / 1000));
+  const laterSigned = signedWebhookBody(rawBody, laterTimestamp);
+  assert.deepEqual(await verifyManusWebhook({ ...options, timestamp: laterTimestamp, signature: laterSigned.signature, now: laterNow }), { valid: true, reason: null });
+  assert.equal(fetchCount, 2);
+  assert.doesNotMatch(JSON.stringify(captured), /privateKey|-----BEGIN PRIVATE KEY-----/i);
+  resetManusWebhookPublicKeyCache();
+});
+
+test('Manus webhook route verifies signatures, limits processing to NEXORA-owned task IDs, deduplicates and streams minimal events', async () => {
+  const cookie = await adminCookie();
+  const adminHeaders = { cookie };
+  const created = await fetch(`${base}/api/control/manus/tasks`, {
+    method: 'POST', headers: { ...adminHeaders, 'content-type': 'application/json', origin: base }, body: JSON.stringify({ message: 'Mock-only task text' }),
+  });
+  assert.equal(created.status, 201);
+  const { taskId } = await created.json();
+  const streamAbort = new AbortController();
+  const streamTimer = setTimeout(() => streamAbort.abort(), 5_000);
+  const stream = await fetch(`${base}/api/control/manus/tasks/${encodeURIComponent(taskId)}/events`, { headers: adminHeaders, signal: streamAbort.signal });
+  assert.equal(stream.status, 200);
+  const reader = stream.body.getReader();
+  const decoder = new TextDecoder();
+  let streamText = '';
+  const readUntil = async (marker) => {
+    while (!streamText.includes(marker)) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      streamText += decoder.decode(value, { stream: true });
+    }
+    return streamText;
+  };
+
+  const postWebhook = (signed, rawBody = signed.rawBody) => fetch(`${base}/api/manus/webhook`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-webhook-signature': signed.signature, 'x-webhook-timestamp': signed.timestamp },
+    body: rawBody,
+  });
+  try {
+    await readUntil('event: ready');
+    const createdPayload = {
+      event_id: 'event_nexora_created_1', event_type: 'task_created',
+      task_detail: { task_id: taskId, task_title: 'CONFIDENTIAL_WEBHOOK_TITLE', task_url: 'https://manus.im/app/task_mock_route_123' },
+    };
+    const createdBody = JSON.stringify(createdPayload);
+    const createdSigned = signedWebhookBody(createdBody);
+    const createdEventResponse = await postWebhook(createdSigned);
+    assert.equal(createdEventResponse.status, 200);
+    assert.deepEqual(await createdEventResponse.json(), { ok: true });
+    const createdStream = await readUntil('event: manus-task-update');
+    const createdData = JSON.parse(createdStream.match(/event: manus-task-update\ndata: ([^\n]+)/)?.[1] || 'null');
+    assert.deepEqual(createdData, { taskId, eventType: 'task_created' });
+    assert.doesNotMatch(createdStream, /CONFIDENTIAL_WEBHOOK_TITLE|task_url|attachments|https:/i);
+
+    const stoppedPayload = {
+      event_id: 'event_nexora_stopped_1', event_type: 'task_stopped',
+      task_detail: {
+        task_id: taskId, task_title: 'CONFIDENTIAL_WEBHOOK_TITLE', task_url: 'https://manus.im/app/task_mock_route_123',
+        message: 'CONFIDENTIAL_WEBHOOK_MESSAGE', attachments: [{ file_name: 'PRIVATE.pdf', url: 'https://files.example/private', size_bytes: 7 }],
+        stop_reason: 'ask', question_expectation: { event_id: 'nested-question-id', options: ['private option'], response_method: 'send_message' },
+      },
+    };
+    const stoppedSigned = signedWebhookBody(JSON.stringify(stoppedPayload));
+    const stoppedResponse = await postWebhook(stoppedSigned);
+    assert.equal(stoppedResponse.status, 200);
+    assert.deepEqual(await stoppedResponse.json(), { ok: true });
+    const stoppedStream = await readUntil('eventType":"task_stopped');
+    assert.match(stoppedStream, /"taskId":"task_mock_route_123","eventType":"task_stopped"/);
+    assert.doesNotMatch(stoppedStream, /CONFIDENTIAL_WEBHOOK_MESSAGE|PRIVATE\.pdf|private option|files\.example|nested-question-id/i);
+
+    const duplicate = await postWebhook(createdSigned);
+    assert.equal(duplicate.status, 200);
+    assert.deepEqual(await duplicate.json(), { ok: true, duplicate: true });
+
+    const otherTaskSigned = signedWebhookBody(JSON.stringify({ event_id: 'event_other_task_1', event_type: 'task_created', task_detail: { task_id: 'task_not_created_by_nexora' } }));
+    const otherTask = await postWebhook(otherTaskSigned);
+    assert.equal(otherTask.status, 200);
+    const otherStream = await fetch(`${base}/api/control/manus/tasks/task_not_created_by_nexora/events`, { headers: adminHeaders });
+    assert.equal(otherStream.status, 404);
+
+    const invalidBodyPayload = { event_id: 'event_raw_mismatch_1', event_type: 'task_created', task_detail: { task_id: taskId } };
+    const invalidBodySigned = signedWebhookBody(JSON.stringify(invalidBodyPayload));
+    const rawMismatch = await postWebhook(invalidBodySigned, Buffer.from(`${invalidBodySigned.rawBody.toString()} `));
+    assert.equal(rawMismatch.status, 401);
+    const invalidSignature = await fetch(`${base}/api/manus/webhook`, { method: 'POST', headers: { 'content-type': 'application/json', 'x-webhook-signature': Buffer.alloc(256).toString('base64'), 'x-webhook-timestamp': String(Math.floor(Date.now() / 1000)) }, body: JSON.stringify(invalidBodyPayload) });
+    assert.equal(invalidSignature.status, 401);
+    const expiredTimestamp = String(Math.floor(Date.now() / 1000) - 301);
+    const expiredSigned = signedWebhookBody(JSON.stringify(invalidBodyPayload), expiredTimestamp);
+    const expired = await postWebhook(expiredSigned);
+    assert.equal(expired.status, 401);
+    const malformedIdSigned = signedWebhookBody(JSON.stringify({ event_id: '', event_type: 'task_stopped', task_detail: { task_id: taskId } }));
+    const malformedId = await postWebhook(malformedIdSigned);
+    assert.equal(malformedId.status, 400);
+    const missingSignature = await fetch(`${base}/api/manus/webhook`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(invalidBodyPayload) });
+    assert.equal(missingSignature.status, 400);
+
+    const safeBodies = [await rawMismatch.text(), await invalidSignature.text(), await expired.text(), await malformedId.text(), await missingSignature.text()];
+    assert.doesNotMatch(safeBodies.join(' '), /MANUS_API_KEY|test-mock-manus-key|CONFIDENTIAL_WEBHOOK|PRIVATE\.pdf|Bearer/i);
+  } finally {
+    clearTimeout(streamTimer);
+    await reader.cancel().catch(() => {});
+  }
 });

@@ -8,6 +8,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createManusTask, getManusTaskProgress, MANUS_TASK_MAX_CHARS } from "./manus-api.js";
+import { MANUS_WEBHOOK_URL, verifyManusWebhook } from "./manus-webhook.js";
 import {
   addRequest,
   addExecution,
@@ -129,6 +130,48 @@ function validManusTaskReceipt(taskId, receipt) {
     return decoded?.taskId === taskId && Number.isInteger(decoded.expiresAt) && decoded.expiresAt > Math.floor(Date.now() / 1000);
   } catch { return false; }
 }
+const MANUS_TASK_OWNERSHIP_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const MANUS_WEBHOOK_REPLAY_TTL_MS = 10 * 60 * 1000;
+const MANUS_WEBHOOK_PENDING_TTL_MS = 2 * 60 * 1000;
+const ownedManusTasks = new Map();
+const pendingManusWebhookEvents = new Map();
+const seenManusWebhookEventIds = new Map();
+const manusTaskEventStreams = new Map();
+function pruneWebhookMap(map, now = Date.now()) {
+  for (const [key, value] of map) if (value.expiresAt <= now) map.delete(key);
+}
+function emitManusTaskEvent(taskId, eventType) {
+  const owner = ownedManusTasks.get(taskId);
+  if (!owner) return false;
+  owner.expiresAt = Date.now() + MANUS_TASK_OWNERSHIP_TTL_MS;
+  owner.latestEvent = { taskId, eventType };
+  const streams = manusTaskEventStreams.get(taskId);
+  if (streams) {
+    const frame = `event: manus-task-update\ndata: ${JSON.stringify(owner.latestEvent)}\n\n`;
+    for (const response of streams) { try { response.write(frame); } catch {} }
+  }
+  return true;
+}
+function registerOwnedManusTask(taskId) {
+  if (typeof taskId !== "string" || !/^[A-Za-z0-9._:-]{1,256}$/.test(taskId)) return;
+  pruneWebhookMap(ownedManusTasks);
+  if (!ownedManusTasks.has(taskId) && ownedManusTasks.size >= 500) ownedManusTasks.delete(ownedManusTasks.keys().next().value);
+  const previous = ownedManusTasks.get(taskId);
+  ownedManusTasks.set(taskId, { expiresAt: Date.now() + MANUS_TASK_OWNERSHIP_TTL_MS, latestEvent: previous?.latestEvent || null });
+  const pending = pendingManusWebhookEvents.get(taskId);
+  if (pending) {
+    pendingManusWebhookEvents.delete(taskId);
+    for (const event of pending.events) emitManusTaskEvent(taskId, event.eventType);
+  }
+}
+function queuePendingManusWebhook(taskId, eventType) {
+  const now = Date.now();
+  pruneWebhookMap(pendingManusWebhookEvents, now);
+  if (!pendingManusWebhookEvents.has(taskId) && pendingManusWebhookEvents.size >= 200) pendingManusWebhookEvents.delete(pendingManusWebhookEvents.keys().next().value);
+  const pending = pendingManusWebhookEvents.get(taskId) || { expiresAt: now + MANUS_WEBHOOK_PENDING_TTL_MS, events: [] };
+  if (pending.events.length < 5) pending.events.push({ eventType });
+  pendingManusWebhookEvents.set(taskId, pending);
+}
 function requireControlKey(req, res, next) {
   const expected = process.env.CONTROL_API_KEY;
   if (!expected || expected.length < 32) return res.status(503).json({ ok: false, error: "Admin authentication is not configured" });
@@ -215,6 +258,7 @@ app.post("/api/control/manus/tasks", requireControlKey, async (req, res) => {
 
   try {
     const task = await createManusTask(message);
+    registerOwnedManusTask(task.taskId);
     const taskReceipt = task.taskId ? issueManusTaskReceipt(task.taskId) : null;
     return res.status(201).json({ ok: true, taskId: task.taskId, taskUrl: task.taskUrl, taskReceipt });
   } catch {
@@ -238,6 +282,69 @@ app.post("/api/control/manus/tasks/progress", requireControlKey, async (req, res
   } catch {
     return res.status(502).json({ ok: false, error: "تعذر قراءة حالة المهمة من Manus. أعد المحاولة لاحقًا." });
   }
+});
+app.post("/api/manus/webhook", async (req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  if (req.originalUrl !== "/api/manus/webhook") return res.status(404).json({ ok: false, error: "Webhook endpoint not found" });
+  if (!req.is("application/json") || !Buffer.isBuffer(req.rawBody) || req.rawBody.length > 1_000_000) return res.status(400).json({ ok: false, error: "Invalid webhook request" });
+
+  const signature = req.get("x-webhook-signature");
+  const timestamp = req.get("x-webhook-timestamp");
+  if (!signature || !timestamp) return res.status(400).json({ ok: false, error: "Invalid webhook request" });
+  let verification;
+  try {
+    verification = await verifyManusWebhook({ signature, timestamp, rawBody: req.rawBody, url: MANUS_WEBHOOK_URL });
+  } catch {
+    return res.status(503).json({ ok: false, error: "Webhook verification temporarily unavailable" });
+  }
+  if (!verification.valid) return res.status(401).json({ ok: false, error: "Webhook verification failed" });
+
+  let event;
+  try { event = JSON.parse(req.rawBody.toString("utf8")); } catch { return res.status(400).json({ ok: false, error: "Invalid webhook request" }); }
+  if (!event || typeof event !== "object" || Array.isArray(event)) return res.status(400).json({ ok: false, error: "Invalid webhook request" });
+  if (!["task_created", "task_stopped"].includes(event.event_type)) return res.status(200).json({ ok: true, ignored: true });
+
+  const eventId = typeof event.event_id === "string" ? event.event_id : "";
+  const taskId = typeof event.task_detail?.task_id === "string" ? event.task_detail.task_id : "";
+  if (!/^[A-Za-z0-9._:-]{1,256}$/.test(eventId) || !/^[A-Za-z0-9._:-]{1,256}$/.test(taskId)) {
+    return res.status(400).json({ ok: false, error: "Invalid webhook event" });
+  }
+
+  const now = Date.now();
+  pruneWebhookMap(seenManusWebhookEventIds, now);
+  const bodyHash = crypto.createHash("sha256").update(req.rawBody).digest("hex");
+  const previousEvent = seenManusWebhookEventIds.get(eventId);
+  if (previousEvent) {
+    if (previousEvent.bodyHash !== bodyHash) return res.status(409).json({ ok: false, error: "Webhook event replay rejected" });
+    return res.status(200).json({ ok: true, duplicate: true });
+  }
+  if (seenManusWebhookEventIds.size >= 10_000) seenManusWebhookEventIds.delete(seenManusWebhookEventIds.keys().next().value);
+  seenManusWebhookEventIds.set(eventId, { bodyHash, expiresAt: now + MANUS_WEBHOOK_REPLAY_TTL_MS });
+
+  if (ownedManusTasks.has(taskId)) emitManusTaskEvent(taskId, event.event_type);
+  else queuePendingManusWebhook(taskId, event.event_type);
+  return res.status(200).json({ ok: true });
+});
+app.get("/api/control/manus/tasks/:taskId/events", requireControlKey, (req, res) => {
+  const taskId = req.params.taskId;
+  const owner = ownedManusTasks.get(taskId);
+  if (!owner || owner.expiresAt <= Date.now()) return res.status(404).json({ ok: false, error: "Task events are not available" });
+
+  res.set({ "Cache-Control": "no-store, private", "Content-Type": "text/event-stream; charset=utf-8", Connection: "keep-alive", "X-Accel-Buffering": "no" });
+  res.status(200);
+  res.flushHeaders?.();
+  res.write(`event: ready\ndata: ${JSON.stringify({ taskId })}\n\n`);
+  if (owner.latestEvent) res.write(`event: manus-task-update\ndata: ${JSON.stringify(owner.latestEvent)}\n\n`);
+  const streams = manusTaskEventStreams.get(taskId) || new Set();
+  streams.add(res);
+  manusTaskEventStreams.set(taskId, streams);
+  const heartbeat = setInterval(() => { try { res.write(": keepalive\n\n"); } catch {} }, 20_000);
+  heartbeat.unref?.();
+  req.on("close", () => {
+    clearInterval(heartbeat);
+    streams.delete(res);
+    if (!streams.size) manusTaskEventStreams.delete(taskId);
+  });
 });
 app.post("/api/control/keys", requireControlKey, (req, res) => {
   const name = String(req.body?.name || "").trim();
