@@ -37,7 +37,7 @@ npm start
 
 ## واجهات الإدارة والجلسات
 
-تتطلب مسارات `/api/control/*` و`/api/commands` و`/api/run` جلسة المدير HttpOnly أو ترويسة إدارة موثوقة. تسجل الواجهة الدخول عبر `/api/auth/login` ولا تخزن المفتاح الإداري في JavaScript. تبقى أسرار HMAC ومفاتيح Render على الخادم.
+تتطلب مسارات `/api/control/*` و`/api/commands` و`/api/run` جلسة المدير HttpOnly أو ترويسة إدارة موثوقة. تسجل الواجهة الدخول عبر `/api/auth/login` ولا تخزن المفتاح الإداري في JavaScript. تبقى أسرار HMAC ومفاتيح Render و`MANUS_API_KEY` على الخادم.
 
 - `GET /api/control/overview`
 - `GET /api/control/devices`
@@ -47,8 +47,12 @@ npm start
 - `GET /api/control/keys`
 - `POST /api/control/keys` و`POST /api/control/keys/:id/disable`
 
+واجهة Manus محمية بجلسة المدير: `POST /api/control/manus/tasks` يقبل `{ "message": "..." }` فقط، بطول لا يتجاوز 10,000 حرف. لا يبدأ إنشاء المهمة إلا عند ضغط المستخدم زر الإرسال. يفرض الخادم `share_visibility: "private"` و`message.connectors: []` كي لا تُستخدم موصلات الحساب الافتراضية، ولا يقبل endpoint أو headers أو scopes أو مرفقات من المتصفح. يستخدم الخادم `MANUS_API_KEY` في `x-manus-api-key` ولا يسجل قيمته أو تفاصيل أخطاء المزود.
+
+بعد إنشاء المهمة، يعرض المركز معرفها ورابطها وإيصال تتبع موقّعًا محدودًا بسبعة أيام؛ `POST /api/control/manus/tasks/progress` لا يقبل إلا معرف المهمة وإيصالها، فلا توجد واجهة لاستعراض مهام الحساب. يقرأ الخادم `task.listMessages` يدويًا عند طلب التحديث، ويعرض الرسائل النصية وحالة `running` أو `waiting` أو `stopped` أو `error`. إذا تطلبت المهمة إجراءً، يوجّه المركز المستخدم إلى Manus ولا يؤكد أي إجراء. عند `stopped` يفحص `task.detail.has_running_background_jobs`؛ القيمة `true` أو غيابها تعني أن الاكتمال غير مؤكد، ولا يُعلن انتهاء التشغيل إلا عند `false`.
+
 قسم Render قراءة فقط؛ لا ينفذ نشرًا أو إيقافًا أو إعادة تشغيل. لا تُجرَ أي تغييرات على إعدادات Render تلقائيًا.
 
 ## التحقق
 
-من `backend/` شغّل `npm test`. الاختبارات تنشئ خادمًا مؤقتًا محليًا وملف allowlist اختباريًا، وتنفّذ أمر Node محليًا يكتب نصًا ثابتًا فقط؛ لا تتصل بخادم إنتاج ولا بخدمة Render.
+من `backend/` شغّل `npm test`. الاختبارات تنشئ خادمًا مؤقتًا محليًا وملف allowlist اختباريًا، وتنفّذ أمر Node محليًا يكتب نصًا ثابتًا فقط؛ تستخدم Manus محاكاة محلية تمنع أي اتصال خارجي، ولا تتصل بخادم إنتاج أو Render أو Manus API.

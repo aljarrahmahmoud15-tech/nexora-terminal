@@ -35,17 +35,26 @@ const navItems = [
   { id: 'requests', label: 'طلبات HMAC', icon: 'shield', group: 'السجلات' },
   { id: 'security', label: 'أحداث الأمان', icon: 'alert', group: 'السجلات' },
   { id: 'render', label: 'خدمات Render', icon: 'activity', group: 'الإدارة' },
+  { id: 'manus', label: 'مهام Manus', icon: 'play', group: 'الإدارة' },
   { id: 'integration', label: 'اتصال الجسر', icon: 'link', group: 'الإدارة' },
   { id: 'settings', label: 'الإعدادات والمفاتيح', icon: 'settings', group: 'الإدارة' },
 ];
 const statusLabel = { online: 'متصل', warning: 'تحذير', offline: 'غير متصل', verified: 'موثّق', rejected: 'مرفوض', expired: 'منتهي' };
 const actionLabel = { start: 'تشغيل', stop: 'إيقاف', restart: 'إعادة تشغيل', command: 'أمر مسموح' };
 const executionLabel = { success: 'نجح', failed: 'فشل', timeout: 'انتهت المهلة', spawn_error: 'تعذر البدء', rejected: 'مرفوض', confirmation_required: 'ينتظر التأكيد' };
+function readLastManusTask() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem('nexora-last-manus-task') || 'null');
+    return saved && typeof saved.taskId === 'string' && typeof saved.taskReceipt === 'string' ? saved : null;
+  } catch { return null; }
+}
 const state = {
   section: 'dashboard', menuOpen: false, modal: null, toast: '', search: '', deviceFilter: 'all', requestFilter: 'all', securityFilter: 'all',
   live: false, liveError: '', lastSync: '', overview: null, stations: [], requests: [], securityEvents: [], keys: [], executions: [],
   commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null, executionStatus: 'idle', executing: false,
   renderServices: [], renderError: '', renderFetchedAt: '', openRouterStatus: null, openRouterError: '',
+  manusPrompt: '', manusTaskBusy: false, manusTaskError: '', manusTaskResult: readLastManusTask(),
+  manusProgressBusy: false, manusProgressError: '', manusTaskProgress: null,
 };
 
 function escapeHtml(value) {
@@ -288,6 +297,34 @@ function renderRenderServices() {
   const cards = state.renderServices.map((service) => `<article class="render-service-card"><div><strong>${escapeHtml(service.name)}</strong><small>${escapeHtml(service.type)} · ${escapeHtml(service.region || 'المنطقة غير متاحة')}</small></div><span class="render-status ${service.suspended ? 'suspended' : 'active'}">${service.suspended ? 'معلّقة' : escapeHtml(service.latestDeploy?.status || 'حالة النشر غير معروفة')}</span><div class="render-service-meta"><code>${escapeHtml(service.id)}</code>${service.url ? `<a href="${escapeHtml(service.url)}" target="_blank" rel="noopener noreferrer">فتح الخدمة</a>` : ''}${service.dashboardUrl ? `<a href="${escapeHtml(service.dashboardUrl)}" target="_blank" rel="noopener noreferrer">لوحة Render</a>` : ''}</div></article>`).join('');
   return `${sectionTitle('الإدارة / المصدر الخارجي', 'خدمات Render', 'قراءة فقط من واجهة Render؛ لا توجد عمليات نشر أو إعادة تشغيل من هذه الصفحة.', `${button('قراءة الآن', 'button secondary', 'refresh-render', 'refresh')}`)}<section class="panel ops-panel render-panel"><div class="panel-head"><div><h2>الخدمات المرتبطة</h2><p>${state.renderFetchedAt ? `آخر قراءة ${escapeHtml(fmtDate(state.renderFetchedAt))}` : 'لم تُقرأ بعد'}</p></div><span class="mini-status info">قراءة فقط</span></div>${state.renderError ? `<div class="empty-state compact"><h3>مصدر Render غير متاح</h3><p>${escapeHtml(state.renderError)}</p></div>` : cards || `<div class="empty-state compact"><h3>لم تُقرأ الخدمات بعد</h3><p>استخدم «قراءة الآن» لاستدعاء المصدر المتصل.</p></div>`}</section>`;
 }
+function renderManusProgress() {
+  const progress = state.manusTaskProgress;
+  if (!progress) return '';
+  const statusLabels = { running: 'قيد التنفيذ', waiting: 'يتطلب إجراءً منك', stopped: 'توقف التشغيل الحالي', error: 'خطأ في المهمة', unknown: 'الحالة غير متاحة' };
+  const stateClass = ['running', 'waiting', 'stopped', 'error'].includes(progress.agentStatus) ? progress.agentStatus : 'unknown';
+  let completionNote = '';
+  if (progress.agentStatus === 'stopped') {
+    if (progress.completionState === 'current_run_stopped') completionNote = 'انتهى تشغيل الوكيل الحالي ولا توجد أعمال خلفية نشطة معروفة؛ النتائج أدناه تخص هذا التشغيل فقط.';
+    else if (progress.completionState === 'background_jobs_running') completionNote = 'توقف الوكيل الرئيسي لكن توجد أعمال خلفية نشطة؛ لا تُعد المهمة مكتملة.';
+    else completionNote = 'حالة الأعمال الخلفية غير معروفة؛ لا تُعد المهمة مكتملة. أعد الفحص لاحقًا.';
+  }
+  const waitingType = progress.waiting?.eventType;
+  const waitingNote = progress.agentStatus === 'waiting'
+    ? `<div class="manus-waiting-note"><strong>يتطلب تدخل المستخدم في Manus</strong><p>${['messageAskUser', 'cascadeAskUser'].includes(waitingType) ? 'تحتاج المهمة إلى رد منك. افتحها في Manus للمتابعة؛ لا يرسل المركز ردودًا نيابةً عنك.' : 'قد تكون هذه مصادقة إجراء أو نوع حدث غير مدعوم. افتح المهمة في Manus واتخذ الإجراء بنفسك؛ لا يؤكد المركز أي إجراء تلقائيًا.'}</p>${waitingType ? `<small>نوع الحدث: <code>${escapeHtml(waitingType)}</code></small>` : ''}${progress.waiting?.description ? `<p>${escapeHtml(progress.waiting.description)}</p>` : ''}</div>`
+    : '';
+  const messages = progress.messages?.length ? progress.messages.map((message) => `<article class="manus-message"><div><strong>${escapeHtml(({ user_message: 'رسالة المستخدم', assistant_message: 'رسالة Manus', error_message: 'تفاصيل الخطأ', status_update: 'تحديث الحالة', user_stop: 'إيقاف', structured_output_result: 'النتيجة' })[message.type] || 'رسالة')}</strong><time>${escapeHtml(fmtDate(message.timestamp))}</time></div><p>${escapeHtml(message.content)}</p></article>`).join('') : '<p class="manus-empty-messages">لا توجد رسائل متاحة لهذه المهمة حتى الآن.</p>';
+  return `<section class="panel ops-panel manus-progress"><div class="panel-head"><div><h2>الحالة والرسائل</h2><p>مهمة NEXORA الأخيرة فقط · لا توجد قائمة مهام للحساب.</p></div><span class="manus-status-pill ${stateClass}">${escapeHtml(statusLabels[progress.agentStatus] || statusLabels.unknown)}</span></div>${completionNote ? `<p class="manus-completion-note">${escapeHtml(completionNote)}</p>` : ''}${waitingNote}<div class="manus-message-list">${messages}</div></section>`;
+}
+function renderManus() {
+  const result = state.manusTaskResult;
+  const taskDetails = result ? `<section class="panel ops-panel manus-result"><div class="panel-head"><div><h2>مهمة NEXORA الأخيرة</h2><p>أُنشئت بعد ضغط زر الإرسال صراحةً.</p></div><span class="mini-status online">خاصة</span></div><div class="manus-result-details">${result.taskId ? `<div><small>معرّف المهمة</small><code>${escapeHtml(result.taskId)}</code></div>` : '<p>تم قبول الطلب، لكن لم يُرجع Manus معرّف مهمة.</p>'}${result.taskUrl ? `<a class="button secondary" href="${escapeHtml(result.taskUrl)}" target="_blank" rel="noopener noreferrer">فتح المهمة في Manus ${icon('arrow',15)}</a>` : ''}${result.taskId && result.taskReceipt ? `<button type="button" class="button secondary" data-action="refresh-manus-task" ${state.manusProgressBusy ? 'disabled' : ''}>${icon('refresh',15)}<span>${state.manusProgressBusy ? 'جارٍ التحقق…' : 'تحقق من الحالة والرسائل'}</span></button>` : ''}</div>${state.manusProgressError ? `<p class="manus-error" role="alert">${escapeHtml(state.manusProgressError)}</p>` : ''}</section>${renderManusProgress()}` : '';
+  return `${sectionTitle('الإدارة / إنشاء مهمة يدويًا', 'إرسال مهمة إلى Manus', 'اكتب التعليمات ثم اضغط زر الإرسال صراحةً. لا تُنشأ أي مهمة عند فتح الصفحة أو أثناء تحميل المركز.')}
+    <section class="panel ops-panel manus-panel"><div class="panel-head"><div><h2>تعليمات المهمة</h2><p>سيُرسل نص التعليمات فقط، عبر الخادم، إلى Manus API.</p></div><span class="mini-status info">خاصة</span></div>
+      <div class="manus-form"><label for="manus-task-message">نص المهمة</label><textarea id="manus-task-message" maxlength="10000" rows="8" placeholder="اكتب ما تريد من Manus إنجازه…" ${state.manusTaskBusy ? 'disabled' : ''}>${escapeHtml(state.manusPrompt)}</textarea><div class="manus-form-meta"><span>حتى 10,000 حرف · لا مرفقات أو إعدادات إضافية</span><span>${state.manusPrompt.length.toLocaleString('ar-JO')} / 10,000</span></div>
+        ${state.manusTaskError ? `<p class="manus-error" role="alert">${escapeHtml(state.manusTaskError)}</p>` : ''}
+        <button type="button" id="submit-manus-task" class="button primary manus-submit" data-action="submit-manus-task" ${state.manusTaskBusy ? 'disabled' : ''}>${icon('play',16)}<span>${state.manusTaskBusy ? 'جارٍ إرسال المهمة…' : 'إرسال المهمة إلى Manus'}</span></button>
+        <p class="manus-safety-note">لن يبدأ أي طلب قبل الضغط على هذا الزر. تُفرض الخصوصية على الخادم، ولا تُستخدم موصلات حساب Manus الافتراضية. التحقق من التقدم يدوي، ولا يؤكد المركز أي إجراء مطلوب.</p></div></section>${taskDetails}`;
+}
 function renderIntegration() {
   const telem = state.overview?.telemetry;
   return `${sectionTitle('الإدارة / اتصال الجسر', 'اتصال NEXORA بالجسر', 'واجهة الويب والـ Linux Bridge يتشاركان نفس الخادم والنطاق؛ لا يوجد رابط API وهمي.', `${button('فحص الجلسة والبيانات', 'button primary', 'refresh-data', 'activity')}`)}<div class="ops-layout"><section class="panel ops-panel"><div class="panel-head"><div><h2>مسارات الجسر الفعلية</h2><p>الخادم نفسه الذي يقدم واجهة الإدارة.</p></div><span class="mini-status ${telem?.configured ? 'online' : 'warning'}">${telem?.configured ? 'مهيأ لاستقبال HMAC' : 'HMAC غير مهيأ'}</span></div><div class="bridge-endpoints"><div><code>GET /api/control/overview</code><span>ملخص الحالة الفعلية · جلسة مدير</span></div><div><code>GET /api/commands</code><span>الكتالوج المسموح · جلسة مدير</span></div><div><code>POST /api/run</code><span>تنفيذ أمر whitelisted · جلسة مدير</span></div><div><code>POST /api/terminal/heartbeat</code><span>نبض الجسر · توقيع HMAC-SHA256</span></div><div><code>POST /api/terminal/event</code><span>حدث الجسر · توقيع HMAC-SHA256</span></div></div><div class="panel-footnote">الجلسة HttpOnly ومحدودة العمر. مفتاح CONTROL_API_KEY وأسرار HMAC لا تغادر الخادم.</div></section><section class="panel ops-panel"><div class="panel-head"><div><h2>حالة المصدر</h2><p>من بيانات الخادم الحالية فقط.</p></div></div><div class="bridge-status-list"><div><span>مفتاح HMAC فعّال</span>${statusPill(telem?.configured ? 'online' : 'offline', telem?.configured ? 'نعم' : 'غير مهيأ')}</div><div><span>وصل heartbeat</span>${statusPill(telem?.heartbeatReceived ? 'online' : 'offline', telem?.heartbeatReceived ? 'نعم' : 'لم يصل بعد')}</div><div><span>كتالوج الأوامر</span>${statusPill(state.commands.length ? 'online' : 'offline', state.commands.length ? `${state.commands.length} أمر` : 'غير مهيأ / فارغ')}</div><div><span>آخر نبض</span><code>${escapeHtml(fmtDate(telem?.latestHeartbeat))}</code></div></div></section></div><section class="panel ops-panel hmac-guide"><div class="panel-head"><div><h2>مصادقة الطرفية الواردة</h2><p>حافظ على توقيع الجسم الخام كما هو؛ لا تغيّر JSON بعد التوقيع.</p></div></div><div class="code-window"><div class="code-top"><span><i></i><i></i><i></i></span><small>HMAC-SHA256</small></div><pre>x-nexora-key: &lt;key-id&gt;
@@ -329,6 +366,7 @@ function render() {
   if (state.section === 'security') content = renderSecurity();
   if (state.section === 'executions') content = renderExecutions();
   if (state.section === 'render') content = renderRenderServices();
+  if (state.section === 'manus') content = renderManus();
   if (state.section === 'integration') content = renderIntegration();
   if (state.section === 'settings') content = renderSettings();
   app.innerHTML = renderShell(content);
@@ -359,6 +397,11 @@ function bindEvents() {
   document.querySelectorAll('[data-action]').forEach((element) => element.addEventListener('click', () => handleAction(element.dataset.action, element)));
   document.querySelectorAll('[data-modal-content]').forEach((element) => element.addEventListener('click', (event) => event.stopPropagation()));
   document.querySelector('#command-select')?.addEventListener('change', (event) => { state.selectedCommandId = event.target.value; render(); });
+  document.querySelector('#manus-task-message')?.addEventListener('input', (event) => {
+    state.manusPrompt = event.target.value;
+    const counter = document.querySelector('.manus-form-meta span:last-child');
+    if (counter) counter.textContent = `${state.manusPrompt.length.toLocaleString('ar-JO')} / 10,000`;
+  });
 }
 function collectCommandArgs() {
   const args = {};
@@ -415,6 +458,52 @@ async function createKey() {
     render();
   } catch (error) { showToast(error.message); }
 }
+async function submitManusTask() {
+  if (state.manusTaskBusy) return;
+  const message = String(document.querySelector('#manus-task-message')?.value ?? state.manusPrompt).trim();
+  state.manusPrompt = message;
+  state.manusTaskError = '';
+  state.manusTaskResult = null;
+  if (!message) {
+    state.manusTaskError = 'اكتب تعليمات المهمة أولًا.';
+    render();
+    return;
+  }
+  if (message.length > 10_000) {
+    state.manusTaskError = 'يجب ألا تتجاوز التعليمات 10,000 حرف.';
+    render();
+    return;
+  }
+  state.manusTaskBusy = true;
+  render();
+  try {
+    state.manusTaskResult = await apiRequest('/api/control/manus/tasks', { method: 'POST', body: JSON.stringify({ message }) });
+    try { sessionStorage.setItem('nexora-last-manus-task', JSON.stringify(state.manusTaskResult)); } catch {}
+    state.manusTaskProgress = null;
+    state.manusProgressError = '';
+    state.manusPrompt = '';
+  } catch (error) {
+    state.manusTaskError = error.message || 'تعذر إرسال المهمة. أعد المحاولة لاحقًا.';
+  } finally {
+    state.manusTaskBusy = false;
+    render();
+  }
+}
+async function refreshManusTask() {
+  const result = state.manusTaskResult;
+  if (state.manusProgressBusy || !result?.taskId || !result?.taskReceipt) return;
+  state.manusProgressBusy = true;
+  state.manusProgressError = '';
+  render();
+  try {
+    state.manusTaskProgress = await apiRequest('/api/control/manus/tasks/progress', { method: 'POST', body: JSON.stringify({ taskId: result.taskId, taskReceipt: result.taskReceipt }) });
+  } catch (error) {
+    state.manusProgressError = error.message || 'تعذر التحقق من الحالة. أعد المحاولة لاحقًا.';
+  } finally {
+    state.manusProgressBusy = false;
+    render();
+  }
+}
 async function disableKey(id) {
   try { await apiRequest(`/api/control/keys/${encodeURIComponent(id)}/disable`, { method: 'POST', body: '{}' }); await loadLiveData(); showToast('تم تعطيل المفتاح'); }
   catch (error) { showToast(error.message); }
@@ -441,6 +530,8 @@ function handleAction(action) {
     navigator.clipboard.writeText(text).then(() => showToast('نُسخت المخرجات')).catch(() => showToast('تعذر نسخ المخرجات'));
   }
   else if (action === 'run-selected') executeCommand(state.selectedCommandId, collectCommandArgs(), false);
+  else if (action === 'submit-manus-task') submitManusTask();
+  else if (action === 'refresh-manus-task') refreshManusTask();
   else if (action === 'confirm-run') { const modal = state.modal; if (modal?.commandId) executeCommand(modal.commandId, modal.args || {}, true); }
   else if (action === 'create-key') { state.modal = { type: 'create-key' }; render(); }
   else if (action === 'confirm-key') createKey();

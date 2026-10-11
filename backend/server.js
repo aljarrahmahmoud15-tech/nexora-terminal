@@ -7,6 +7,7 @@ import https from "node:https";
 import path from "node:path";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
+import { createManusTask, getManusTaskProgress, MANUS_TASK_MAX_CHARS } from "./manus-api.js";
 import {
   addRequest,
   addExecution,
@@ -110,6 +111,24 @@ function sameOrigin(req) {
   if (!origin) return true;
   try { const forwarded = (req.get("x-forwarded-proto") || req.protocol).split(",")[0].trim(); return new URL(origin).origin === `${forwarded}://${req.get("host")}`; } catch { return false; }
 }
+const MANUS_TASK_RECEIPT_TTL_SECONDS = 7 * 24 * 60 * 60;
+function issueManusTaskReceipt(taskId) {
+  const expiresAt = Math.floor(Date.now() / 1000) + MANUS_TASK_RECEIPT_TTL_SECONDS;
+  const payload = Buffer.from(JSON.stringify({ taskId, expiresAt })).toString("base64url");
+  const signature = crypto.createHmac("sha256", process.env.CONTROL_API_KEY || "").update(`nexora-manus-task-v1.${payload}`).digest("base64url");
+  return `${payload}.${signature}`;
+}
+function validManusTaskReceipt(taskId, receipt) {
+  if (typeof receipt !== "string" || receipt.length > 2_000) return false;
+  const [payload, signature, extra] = receipt.split(".");
+  if (!payload || !signature || extra) return false;
+  const expected = crypto.createHmac("sha256", process.env.CONTROL_API_KEY || "").update(`nexora-manus-task-v1.${payload}`).digest("base64url");
+  if (!constantTimeEqual(signature, expected)) return false;
+  try {
+    const decoded = JSON.parse(Buffer.from(payload, "base64url").toString("utf8"));
+    return decoded?.taskId === taskId && Number.isInteger(decoded.expiresAt) && decoded.expiresAt > Math.floor(Date.now() / 1000);
+  } catch { return false; }
+}
 function requireControlKey(req, res, next) {
   const expected = process.env.CONTROL_API_KEY;
   if (!expected || expected.length < 32) return res.status(503).json({ ok: false, error: "Admin authentication is not configured" });
@@ -177,6 +196,48 @@ app.get("/api/control/openrouter/status", requireControlKey, (_req, res) => {
     model: process.env.OPENROUTER_MODEL?.trim() || null,
     lastTest: { status: "not_run", testedAt: null },
   });
+});
+app.post("/api/control/manus/tasks", requireControlKey, async (req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || !Object.hasOwn(body, "message")) {
+    return res.status(400).json({ ok: false, error: "أرسل نص التعليمات فقط." });
+  }
+  const message = typeof body.message === "string" ? body.message.trim() : "";
+  if (!message || message.length > MANUS_TASK_MAX_CHARS) {
+    return res.status(400).json({ ok: false, error: `يجب أن تكون التعليمات غير فارغة وألا تتجاوز ${MANUS_TASK_MAX_CHARS} حرف.` });
+  }
+  if (!process.env.MANUS_API_KEY?.trim()) {
+    return res.status(503).json({ ok: false, error: "تكامل Manus غير مهيأ على الخادم." });
+  }
+
+  try {
+    const task = await createManusTask(message);
+    const taskReceipt = task.taskId ? issueManusTaskReceipt(task.taskId) : null;
+    return res.status(201).json({ ok: true, taskId: task.taskId, taskUrl: task.taskUrl, taskReceipt });
+  } catch {
+    return res.status(502).json({ ok: false, error: "تعذر إرسال المهمة إلى Manus. تحقق من الإعداد ثم أعد المحاولة." });
+  }
+});
+app.post("/api/control/manus/tasks/progress", requireControlKey, async (req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 2 || !Object.hasOwn(body, "taskId") || !Object.hasOwn(body, "taskReceipt")) {
+    return res.status(400).json({ ok: false, error: "بيانات تتبع المهمة غير صالحة." });
+  }
+  const taskId = typeof body.taskId === "string" ? body.taskId.trim() : "";
+  if (!taskId || taskId.length > 256 || !validManusTaskReceipt(taskId, body.taskReceipt)) {
+    return res.status(404).json({ ok: false, error: "المهمة غير متاحة للتتبع من هذا المركز." });
+  }
+  try {
+    const progress = await getManusTaskProgress(taskId);
+    return res.json({ ok: true, ...progress });
+  } catch {
+    return res.status(502).json({ ok: false, error: "تعذر قراءة حالة المهمة من Manus. أعد المحاولة لاحقًا." });
+  }
 });
 app.post("/api/control/keys", requireControlKey, (req, res) => {
   const name = String(req.body?.name || "").trim();
