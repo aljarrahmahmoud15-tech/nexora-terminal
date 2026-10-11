@@ -14,11 +14,12 @@ npm ci
 npm start
 ```
 
-افتح `http://localhost:8787`. تُقدَّم الواجهة وواجهات API من خادم Express نفسه. يلزم ضبط `CONTROL_API_KEY` بسر عشوائي قوي لا يقل عن 32 محرفًا، وتهيئة `NEXORA_KEYS_JSON` لاستقبال الطرفيات. لا تضع الأسرار في Git أو الواجهة.
+افتح `http://localhost:8787`. تُقدَّم الواجهة وواجهات API من خادم Express نفسه. يلزم ضبط `CONTROL_API_KEY` بسر عشوائي قوي لا يقل عن 32 محرفًا، وتهيئة مفاتيح الطرفيات عبر `NEXORA_KEYS_JSON` أو سر الجسر المنفرد `NEXORA_BRIDGE_HMAC_SECRET`. لا تضع الأسرار في Git أو الواجهة.
 
 ## اتصال Linux Bridge
 
 - يستقبل `POST /api/terminal/heartbeat` و`POST /api/terminal/event` الرسائل الطرفية بتوقيع HMAC-SHA256.
+- عند ضبط `NEXORA_BRIDGE_HMAC_SECRET` على الخادم، يرسل العميل `nexora-linux-bridge-prod` في ترويسة `x-nexora-key`؛ تبقى بقية مفاتيح `NEXORA_KEYS_JSON` كما هي.
 - صيغة التوقيع: `HMAC-SHA256(secret, timestamp + "." + rawRequestBody)`؛ راجع [HMAC_INTEGRATION.md](HMAC_INTEGRATION.md) للعقد الكامل.
 - تُحسب حالة الاتصال من آخر نبضة موثقة؛ الافتراضي أن تصبح العقدة غير متصلة بعد 300 ثانية (`HEARTBEAT_STALE_SECONDS`).
 - عند غياب المفتاح أو النبضة تعرض الواجهة «غير مهيأ» أو «بانتظار أول نبض» بدل العدادات الافتراضية.

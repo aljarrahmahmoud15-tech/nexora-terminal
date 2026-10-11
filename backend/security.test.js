@@ -9,6 +9,7 @@ import path from 'node:path';
 
 const adminSecret = `test-only-${'x'.repeat(48)}`;
 const hmacSecret = 'local-test-hmac-secret-never-used-outside-this-test';
+const bridgeSecret = 'test-only-bridge-hmac-secret-never-used-outside-this-test';
 const actionCommandId = 'test_local_restart';
 let child;
 let base;
@@ -49,7 +50,17 @@ before(async () => {
   base = `http://127.0.0.1:${port}`;
   child = spawn(process.execPath, ['server.js'], {
     cwd: new URL('.', import.meta.url),
-    env: { ...process.env, PORT: String(port), NODE_ENV: 'production', CONTROL_API_KEY: adminSecret, COMMANDS_FILE: commandsFile, NEXORA_KEYS_JSON: JSON.stringify([{ name: 'test-terminal', id: 'test-key', secret: hmacSecret, status: 'active' }]), OPENROUTER_API_KEY: '', OPENROUTER_MODEL: '' },
+    env: {
+      ...process.env,
+      PORT: String(port),
+      NODE_ENV: 'production',
+      CONTROL_API_KEY: adminSecret,
+      COMMANDS_FILE: commandsFile,
+      NEXORA_KEYS_JSON: JSON.stringify([{ name: 'test-terminal', id: 'test-key', secret: hmacSecret, status: 'active' }]),
+      NEXORA_BRIDGE_HMAC_SECRET: bridgeSecret,
+      OPENROUTER_API_KEY: '',
+      OPENROUTER_MODEL: '',
+    },
     stdio: 'ignore',
   });
   for (let i = 0; i < 50; i++) {
@@ -158,6 +169,34 @@ test('telemetry starts empty and only a valid HMAC heartbeat creates a live devi
   assert.equal(after.devices.total, 1);
   assert.equal(after.telemetry.heartbeatReceived, true);
   assert.equal(after.devices.online, 1);
+});
+
+test('bridge env key is merged, accepts only a valid HMAC, and never exposes its secret', async () => {
+  const payload = JSON.stringify({ deviceId: 'bridge-env-test-terminal', type: 'bridge-test' });
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const signature = crypto.createHmac('sha256', bridgeSecret).update(`${timestamp}.${payload}`).digest('hex');
+  const accepted = await fetch(`${base}/api/terminal/heartbeat`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-nexora-key': 'nexora-linux-bridge-prod', 'x-nexora-timestamp': timestamp, 'x-nexora-signature': `sha256=${signature}` },
+    body: payload,
+  });
+  assert.equal(accepted.status, 200);
+
+  const invalidSignature = crypto.createHmac('sha256', 'incorrect-bridge-secret').update(`${timestamp}.${payload}`).digest('hex');
+  const rejected = await fetch(`${base}/api/terminal/event`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', 'x-nexora-key': 'nexora-linux-bridge-prod', 'x-nexora-timestamp': timestamp, 'x-nexora-signature': `sha256=${invalidSignature}` },
+    body: payload,
+  });
+  assert.equal(rejected.status, 401);
+
+  const cookie = await adminCookie();
+  const keyResponse = await fetch(`${base}/api/control/keys`, { headers: { cookie } });
+  assert.equal(keyResponse.status, 200);
+  const listedKeys = (await keyResponse.json()).keys;
+  assert.deepEqual(new Set(listedKeys.map((key) => key.id)), new Set(['test-key', 'nexora-linux-bridge-prod']));
+  assert.equal(listedKeys.find((key) => key.id === 'nexora-linux-bridge-prod').name, 'nexora-linux-bridge-prod');
+  assert.equal(JSON.stringify(listedKeys).includes(bridgeSecret), false);
 });
 
 test('Render remains read-only and does not contact upstream when its server key is absent', async () => {

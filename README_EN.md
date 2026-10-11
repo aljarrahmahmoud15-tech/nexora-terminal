@@ -59,4 +59,5 @@ For Indonesian documentation, see the original files:
 - Only whitelist safe commands in `commands.json`
 - Never expose sensitive data in command outputs
 - Use environment variables for sensitive configuration
+- Set the server-only `NEXORA_BRIDGE_HMAC_SECRET` to add a dedicated key without removing entries from `NEXORA_KEYS_JSON`; clients send `nexora-linux-bridge-prod` in `x-nexora-key`. See [HMAC_INTEGRATION.md](HMAC_INTEGRATION.md).
 - Regularly update dependencies for security patches

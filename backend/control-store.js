@@ -11,20 +11,37 @@ const securityEvents = [];
 const executions = [];
 
 function loadKeys() {
+  let configuredKeys = [];
   try {
     const parsed = JSON.parse(process.env.NEXORA_KEYS_JSON || "[]");
-    if (Array.isArray(parsed) && parsed.length) return parsed;
+    if (Array.isArray(parsed)) configuredKeys = parsed;
   } catch {
     // Keep an empty key set when production configuration is invalid.
   }
+  const bridgeSecret = process.env.NEXORA_BRIDGE_HMAC_SECRET;
+  if (typeof bridgeSecret === "string" && bridgeSecret.length > 0) {
+    const bridgeId = "nexora-linux-bridge-prod";
+    const existingIndex = configuredKeys.findIndex((key) => key?.id === bridgeId);
+    const existing = existingIndex >= 0 ? configuredKeys[existingIndex] : {};
+    const bridgeKey = {
+      ...existing,
+      name: bridgeId,
+      id: bridgeId,
+      secret: bridgeSecret,
+      status: "active",
+      created: existing.created || now(),
+      lastUsed: existing.lastUsed || null,
+    };
+    if (existingIndex >= 0) configuredKeys[existingIndex] = bridgeKey;
+    else configuredKeys.push(bridgeKey);
+  }
+  if (configuredKeys.length) return configuredKeys;
   if (process.env.NODE_ENV === "production") return [];
   return [{ name: "local-demo", id: "key_demo", secret: "change-me-in-env", status: "active", created: now(), lastUsed: null }];
 }
 const keys = new Map(loadKeys().map((key) => [key.id, key]));
 
-export function publicKey(key) {
-  return { name: key.name, id: key.id, created: key.created, status: key.status, lastUsed: key.lastUsed };
-}
+export function publicKey(key) { return { name: key.name, id: key.id, created: key.created, status: key.status, lastUsed: key.lastUsed }; }
 
 export function listKeys() { return [...keys.values()].map(publicKey); }
 export function createKey(name) {
