@@ -1,18 +1,14 @@
 import crypto from "node:crypto";
+import "dotenv/config";
 
 const now = () => new Date().toISOString();
+const HEARTBEAT_STALE_MS = Math.max(30, Number(process.env.HEARTBEAT_STALE_SECONDS || 300)) * 1000;
 
-const seedDevices = [
-  { id: "NX-00421", name: "محطة الرياض — البوابة الشمالية", type: "Kiosk Prime", status: "online", lastSeen: now(), ip: "10.24.8.41", version: "2.8.1", region: "الرياض" },
-  { id: "NX-00419", name: "محطة جدة — صالة الوصول", type: "Kiosk Prime", status: "online", lastSeen: now(), ip: "10.24.6.18", version: "2.8.1", region: "جدة" },
-  { id: "NX-00388", name: "محطة الدمام — المدخل الرئيسي", type: "Terminal Edge", status: "warning", lastSeen: new Date(Date.now() - 4 * 60_000).toISOString(), ip: "10.18.3.72", version: "2.7.9", region: "الدمام" },
-  { id: "NX-00352", name: "محطة أبوظبي — المبنى B", type: "Terminal Edge", status: "offline", lastSeen: new Date(Date.now() - 2 * 60 * 60_000).toISOString(), ip: "10.16.4.09", version: "2.7.8", region: "أبوظبي" },
-  { id: "NX-00341", name: "محطة دبي — مركز العمليات", type: "Kiosk Prime", status: "online", lastSeen: new Date(Date.now() - 8 * 60_000).toISOString(), ip: "10.12.9.11", version: "2.8.1", region: "دبي" },
-];
-
-const devices = new Map(seedDevices.map((device) => [device.id, device]));
+// Production telemetry starts empty. Devices appear only after a valid HMAC heartbeat.
+const devices = new Map();
 const requests = [];
 const securityEvents = [];
+const executions = [];
 
 function loadKeys() {
   try {
@@ -55,17 +51,36 @@ export function upsertDevice(id, patch = {}) {
   devices.set(id, updated);
   return updated;
 }
-export function listDevices() { return [...devices.values()].sort((a, b) => a.id.localeCompare(b.id)); }
+export function listDevices() {
+  const cutoff = Date.now() - HEARTBEAT_STALE_MS;
+  return [...devices.values()].map((device) => ({
+    ...device,
+    status: Date.parse(device.lastSeen || "") >= cutoff ? "online" : "offline",
+  })).sort((a, b) => a.id.localeCompare(b.id));
+}
 export function listRequests() { return requests.slice(0, 100); }
 export function listSecurityEvents() { return securityEvents.slice(0, 100); }
+export function addExecution(entry) {
+  executions.unshift({ ...entry, time: now() });
+  if (executions.length > 100) executions.pop();
+}
+export function listExecutions() { return executions.slice(0, 100); }
 export function overview() {
   const all = listDevices();
   const verified = requests.filter((item) => item.status === "verified").length;
   const rejected = requests.filter((item) => item.status !== "verified").length;
+  const latestHeartbeat = all.reduce((latest, device) => !latest || device.lastSeen > latest ? device.lastSeen : latest, null);
+  const online = all.filter((device) => device.status === "online").length;
   return {
-    devices: { total: all.length, online: all.filter((d) => d.status === "online").length, warning: all.filter((d) => d.status === "warning").length, offline: all.filter((d) => d.status === "offline").length },
+    devices: { total: all.length, online, warning: all.filter((device) => device.status === "warning").length, offline: all.filter((device) => device.status === "offline").length },
     requests: { total: requests.length, verified, rejected },
     security: { open: securityEvents.filter((event) => event.level === "high" || event.level === "medium").length },
+    telemetry: {
+      configured: [...keys.values()].some((key) => key.status === "active"),
+      heartbeatReceived: all.length > 0,
+      latestHeartbeat,
+      staleAfterSeconds: Math.round(HEARTBEAT_STALE_MS / 1000),
+    },
     generatedAt: now(),
   };
 }

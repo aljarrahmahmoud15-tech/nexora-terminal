@@ -9,11 +9,13 @@ import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import {
   addRequest,
+  addExecution,
   addSecurityEvent,
   createKey,
   disableKey,
   findKey,
   listDevices,
+  listExecutions,
   listKeys,
   listRequests,
   listSecurityEvents,
@@ -27,19 +29,46 @@ app.set("trust proxy", 1);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(__dirname, "../frontend");
 const PORT = Number(process.env.PORT || 8787);
-const COMMANDS_FILE = process.env.COMMANDS_FILE || "./commands.json";
+const configuredCommandsFile = process.env.COMMANDS_FILE || "./commands.json";
+const COMMANDS_FILE = path.isAbsolute(configuredCommandsFile) ? configuredCommandsFile : path.resolve(__dirname, configuredCommandsFile);
 const CLOCK_SKEW = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
-const DANGEROUS = /[;&|`$<>]/g;
+const DANGEROUS = /[;&|`$<>\u0000-\u001f\u007f]/;
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || false, credentials: true }));
 app.use(express.json({ limit: "1mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 
 function loadCommands() {
-  if (!fs.existsSync(COMMANDS_FILE)) return [];
-  const parsed = JSON.parse(fs.readFileSync(COMMANDS_FILE, "utf-8"));
-  return Array.isArray(parsed) ? parsed : [];
+  if (!fs.existsSync(COMMANDS_FILE)) return { configured: false, reason: "missing", commands: [] };
+  try {
+    const parsed = JSON.parse(fs.readFileSync(COMMANDS_FILE, "utf-8"));
+    if (!Array.isArray(parsed)) return { configured: false, reason: "invalid", commands: [] };
+    const ids = new Set();
+    for (const command of parsed) {
+      const invalidParams = command?.params !== undefined && (
+        !Array.isArray(command.params) || !command.params.every((param) => typeof param === "string")
+      );
+      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || typeof command.exec !== "string" || invalidParams) {
+        return { configured: false, reason: "invalid", commands: [] };
+      }
+      ids.add(command.id);
+      if (command.serviceAction) {
+        const action = command.serviceAction;
+        if (!action || !["start", "stop", "restart"].includes(action.operation) || typeof action.service !== "string" || !action.service.trim() || action.service.length > 100) {
+          return { configured: false, reason: "invalid", commands: [] };
+        }
+      }
+    }
+    return { configured: true, reason: parsed.length ? "ready" : "empty", commands: parsed };
+  } catch {
+    return { configured: false, reason: "invalid", commands: [] };
+  }
 }
-function getCommandById(id) { return loadCommands().find((command) => command.id === id); }
+function publicCommand(command) {
+  const inputs = new Set((command.params || []).flatMap((param) => [...param.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((match) => match[1])));
+  const result = { id: command.id, title: command.title, description: command.description || "", inputs: [...inputs].map((name) => ({ name })) };
+  if (command.serviceAction) result.serviceAction = { operation: command.serviceAction.operation, service: command.serviceAction.service };
+  return result;
+}
 function sanitizeArg(value) {
   const clipped = (value === undefined || value === null ? "" : String(value)).slice(0, 800);
   if (DANGEROUS.test(clipped)) throw new Error("Argument contains disallowed characters.");
@@ -140,6 +169,7 @@ app.get("/api/control/devices", requireControlKey, (_req, res) => res.json({ dev
 app.get("/api/control/requests", requireControlKey, (_req, res) => res.json({ requests: listRequests() }));
 app.get("/api/control/security", requireControlKey, (_req, res) => res.json({ events: listSecurityEvents() }));
 app.get("/api/control/keys", requireControlKey, (_req, res) => res.json({ keys: listKeys() }));
+app.get("/api/control/executions", requireControlKey, (_req, res) => res.json({ executions: listExecutions(), retention: "آخر 100 تنفيذ في ذاكرة العملية" }));
 app.post("/api/control/keys", requireControlKey, (req, res) => {
   const name = String(req.body?.name || "").trim();
   if (!name) return res.status(400).json({ ok: false, error: "name is required" });
@@ -211,25 +241,52 @@ app.get("/api/render/services", requireControlKey, async (_req, res) => {
 });
 
 app.get("/api/commands", requireControlKey, (_req, res) => {
-  const commands = loadCommands().map(({ id, title, description, exampleArgs }) => ({ id, title, description, exampleArgs: exampleArgs || {} }));
-  res.json({ commands });
+  res.set("Cache-Control", "no-store, private");
+  const catalog = loadCommands();
+  res.json({ configured: catalog.configured, reason: catalog.reason, source: "server-side COMMANDS_FILE whitelist", commands: catalog.commands.map(publicCommand) });
 });
 app.post("/api/run", requireControlKey, async (req, res) => {
+  const startedAt = Date.now();
+  const commandId = typeof req.body?.commandId === "string" ? req.body.commandId.slice(0, 80) : "";
   try {
-    const { commandId, args } = req.body || {};
     if (!commandId) return res.status(400).json({ error: "commandId is required" });
-    const command = getCommandById(commandId);
+    const catalog = loadCommands();
+    if (!catalog.configured || !catalog.commands.length) return res.status(503).json({ ok: false, configured: false, error: "Command catalog is not configured" });
+    const command = catalog.commands.find((item) => item.id === commandId);
     if (!command) return res.status(404).json({ error: "Command not found" });
-    const safeArgs = args && typeof args === "object" ? args : {};
+    if (command.serviceAction && req.body?.confirmedCommandId !== command.id) {
+      addExecution({ commandId: command.id, title: command.title, operation: command.serviceAction.operation, service: command.serviceAction.service, status: "confirmation_required", durationMs: 0 });
+      return res.status(428).json({ ok: false, confirmationRequired: true, commandId: command.id, title: command.title, serviceAction: { operation: command.serviceAction.operation, service: command.serviceAction.service } });
+    }
+    const args = req.body?.args;
+    if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args))) return res.status(400).json({ ok: false, error: "args must be an object" });
+    const safeArgs = args || {};
     const finalParams = (command.params || []).map((param) => typeof param === "string" ? param.replace(/\{\{(\w+)\}\}/g, (_, key) => sanitizeArg(safeArgs[key])) : "");
-    const timeoutMs = Math.min(Number(command.timeoutMs || 120000), 300000);
-    const child = spawn(command.exec, finalParams, { cwd: command.cwd || process.cwd(), env: { ...process.env, ...(command.env || {}) }, shell: false });
-    let stdout = ""; let stderr = "";
-    child.stdout.on("data", (data) => { stdout += data.toString(); });
-    child.stderr.on("data", (data) => { stderr += data.toString(); });
-    const killTimer = setTimeout(() => child.kill("SIGKILL"), timeoutMs);
-    child.on("close", (code) => { clearTimeout(killTimer); res.json({ ok: code === 0, code, stdout, stderr }); });
-  } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
+    const requestedTimeout = Number(command.timeoutMs || 120000);
+    const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1000, Math.min(requestedTimeout, 300000)) : 120000;
+    const childEnv = { PATH: process.env.PATH || "/usr/bin:/bin", HOME: process.env.HOME || "/tmp", TMPDIR: process.env.TMPDIR || "/tmp", LANG: process.env.LANG || "C.UTF-8", ...(command.env && typeof command.env === "object" ? command.env : {}) };
+    const child = spawn(command.exec, finalParams, { cwd: command.cwd || process.cwd(), env: childEnv, shell: false, stdio: ["ignore", "pipe", "pipe"] });
+    let stdout = ""; let stderr = ""; let timedOut = false; let settled = false;
+    const appendOutput = (current, chunk) => `${current}${chunk.toString()}`.slice(0, 16_000);
+    child.stdout.on("data", (data) => { stdout = appendOutput(stdout, data); });
+    child.stderr.on("data", (data) => { stderr = appendOutput(stderr, data); });
+    const finish = (code, spawnError = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      const durationMs = Date.now() - startedAt;
+      const status = spawnError ? "spawn_error" : timedOut ? "timeout" : code === 0 ? "success" : "failed";
+      addExecution({ commandId: command.id, title: command.title, operation: command.serviceAction?.operation || "command", service: command.serviceAction?.service || null, status, exitCode: Number.isInteger(code) ? code : null, durationMs });
+      if (spawnError) return res.status(500).json({ ok: false, error: "Unable to start whitelisted command" });
+      return res.json({ ok: code === 0 && !timedOut, commandId: command.id, title: command.title, operation: command.serviceAction?.operation || "command", service: command.serviceAction?.service || null, code, timedOut, durationMs, stdout, stderr });
+    };
+    const killTimer = setTimeout(() => { timedOut = true; child.kill("SIGKILL"); }, timeoutMs);
+    child.once("error", (error) => finish(null, error));
+    child.once("close", (code) => finish(code));
+  } catch (error) {
+    addExecution({ commandId: commandId || "unknown", title: "أمر مرفوض", operation: "command", status: "rejected", durationMs: Date.now() - startedAt });
+    res.status(400).json({ ok: false, error: String(error?.message || error) });
+  }
 });
 
 function ghRequest(method, requestPath, token, body) {
