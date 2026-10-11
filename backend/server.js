@@ -337,7 +337,7 @@ function requireHmac(req, res, next) {
   next();
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "nexora-command-meta-bot-node" }));
+app.get("/health", (_req, res) => res.json({ ok: true, service: "nexora-terminal-control" }));
 
 // Live admin data: protect these with CONTROL_API_KEY in production.
 app.get("/api/control/overview", requireControlKey, (_req, res) => res.json(overview()));

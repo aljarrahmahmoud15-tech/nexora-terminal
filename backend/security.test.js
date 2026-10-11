@@ -265,7 +265,9 @@ test('Render remains read-only and does not contact upstream when its server key
   const body = await response.text();
   assert.equal(body, JSON.stringify({ ok: false, configured: false, error: 'Render API key is not configured' }));
   assert.doesNotMatch(body, /Authorization|Bearer/);
-  assert.equal((await fetch(`${base}/health`)).status, 200);
+  const healthResponse = await fetch(`${base}/health`);
+  assert.equal(healthResponse.status, 200);
+  assert.deepEqual(await healthResponse.json(), { ok: true, service: 'nexora-terminal-control' });
 });
 
 test('Manus create/progress routes are authenticated, text-only, receipt-scoped, and use only the local mock', async () => {
