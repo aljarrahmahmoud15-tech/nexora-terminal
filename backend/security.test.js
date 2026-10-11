@@ -69,6 +69,7 @@ before(async () => {
       COMMANDS_FILE: commandsFile,
       NEXORA_KEYS_JSON: JSON.stringify([{ name: 'test-terminal', id: 'test-key', secret: hmacSecret, status: 'active' }]),
       NEXORA_BRIDGE_HMAC_SECRET: bridgeSecret,
+      NEXORA_BRIDGE_JOBS_MODE: 'single_instance_memory',
       OPENROUTER_API_KEY: '',
       OPENROUTER_MODEL: '',
       MANUS_API_KEY: manusTestSecret,
@@ -89,10 +90,10 @@ after(() => {
 });
 
 test('all management, command, and GitHub routes reject unauthenticated requests', async () => {
-  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/control/openrouter/status', '/api/commands', '/api/render/services', '/api/control/manus/tasks/task_mock_route_123/events']) {
+  for (const pathName of ['/api/control/overview', '/api/control/devices', '/api/control/requests', '/api/control/security', '/api/control/keys', '/api/control/executions', '/api/control/openrouter/status', '/api/control/jobs', '/api/control/jobs/commands', '/api/commands', '/api/render/services', '/api/control/manus/tasks/task_mock_route_123/events']) {
     assert.equal((await fetch(`${base}${pathName}`)).status, 401, pathName);
   }
-  for (const pathName of ['/api/run', '/api/control/manus/tasks', '/api/control/manus/tasks/progress', '/api/github/push', '/api/github/create-repo', '/api/github/connect', '/api/github/sync-commands']) {
+  for (const pathName of ['/api/run', '/api/control/jobs', '/api/control/manus/tasks', '/api/control/manus/tasks/progress', '/api/github/push', '/api/github/create-repo', '/api/github/connect', '/api/github/sync-commands']) {
     assert.equal((await fetch(`${base}${pathName}`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' })).status, 401, pathName);
   }
 });
@@ -211,6 +212,50 @@ test('bridge env key is merged, accepts only a valid HMAC, and never exposes its
   assert.deepEqual(new Set(listedKeys.map((key) => key.id)), new Set(['test-key', 'nexora-linux-bridge-prod']));
   assert.equal(listedKeys.find((key) => key.id === 'nexora-linux-bridge-prod').name, 'nexora-linux-bridge-prod');
   assert.equal(JSON.stringify(listedKeys).includes(bridgeSecret), false);
+});
+
+test('Control Center submits only server-whitelisted jobs through the signed local runner', async () => {
+  const cookie = await adminCookie();
+  const headers = { cookie, 'content-type': 'application/json', origin: base };
+  const configuration = await (await fetch(`${base}/api/control/jobs`, { headers: { cookie } })).json();
+  assert.equal(configuration.enabled, true);
+  assert.equal(configuration.executor, 'local_render');
+  assert.equal(configuration.remoteLinuxAgentConnected, false);
+  assert.equal(configuration.storage, 'bounded_process_memory');
+
+  const catalog = await (await fetch(`${base}/api/control/jobs/commands`, { headers: { cookie } })).json();
+  assert.ok(catalog.commands.some((command) => command.id === 'health_check'));
+  assert.equal(catalog.remoteLinuxAgentConnected, false);
+
+  const jobId = crypto.randomBytes(16).toString('hex');
+  const submitted = await fetch(`${base}/api/control/jobs`, { method: 'POST', headers, body: JSON.stringify({ jobId, commandId: 'health_check' }) });
+  assert.equal(submitted.status, 200);
+  const first = await submitted.json();
+  assert.equal(first.job.jobId, jobId);
+  assert.equal(first.job.status, 'success');
+  assert.equal(first.job.executor, 'local_render');
+  const health = JSON.parse(first.job.result.stdout);
+  assert.equal(health.runner, 'local_render');
+  assert.equal(health.service, 'nexora-terminal-control');
+  assert.doesNotMatch(JSON.stringify(first), new RegExp(bridgeSecret));
+
+  const duplicate = await fetch(`${base}/api/control/jobs`, { method: 'POST', headers, body: JSON.stringify({ jobId, commandId: 'health_check' }) });
+  assert.equal(duplicate.status, 200);
+  assert.equal((await duplicate.json()).duplicate, true);
+
+  const jobs = await (await fetch(`${base}/api/control/jobs`, { headers: { cookie } })).json();
+  assert.equal(jobs.jobs[0].jobId, jobId);
+  assert.doesNotMatch(JSON.stringify(jobs), new RegExp(bridgeSecret));
+
+  const badOrigin = await fetch(`${base}/api/control/jobs`, { method: 'POST', headers: { ...headers, origin: 'https://evil.example' }, body: JSON.stringify({ jobId: crypto.randomBytes(16).toString('hex'), commandId: 'health_check' }) });
+  assert.equal(badOrigin.status, 403);
+  const extraFields = await fetch(`${base}/api/control/jobs`, { method: 'POST', headers, body: JSON.stringify({ jobId: crypto.randomBytes(16).toString('hex'), commandId: 'health_check', exec: '/bin/sh' }) });
+  assert.equal(extraFields.status, 400);
+  const unlisted = await fetch(`${base}/api/control/jobs`, { method: 'POST', headers, body: JSON.stringify({ jobId: crypto.randomBytes(16).toString('hex'), commandId: 'arbitrary_shell' }) });
+  assert.equal(unlisted.status, 404);
+
+  const noHeaders = await fetch(`${base}/internal/jobs`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{}' });
+  assert.equal(noHeaders.status, 400);
 });
 
 test('Render remains read-only and does not contact upstream when its server key is absent', async () => {

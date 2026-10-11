@@ -30,6 +30,7 @@ const app = document.querySelector('#app');
 const navItems = [
   { id: 'dashboard', label: 'المركز التشغيلي', icon: 'grid', group: 'العمليات' },
   { id: 'commands', label: 'كتالوج الأوامر', icon: 'terminal', group: 'العمليات' },
+  { id: 'jobs', label: 'مهام HMAC الموقّعة', icon: 'shield', group: 'العمليات' },
   { id: 'devices', label: 'البوتات والطبقات', icon: 'layers', group: 'العمليات' },
   { id: 'executions', label: 'سجل التنفيذ', icon: 'activity', group: 'السجلات' },
   { id: 'requests', label: 'طلبات HMAC', icon: 'shield', group: 'السجلات' },
@@ -52,6 +53,7 @@ const state = {
   section: 'dashboard', menuOpen: false, modal: null, toast: '', search: '', deviceFilter: 'all', requestFilter: 'all', securityFilter: 'all',
   live: false, liveError: '', lastSync: '', overview: null, stations: [], requests: [], securityEvents: [], keys: [], executions: [],
   commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null, executionStatus: 'idle', executing: false,
+  bridgeJobConfig: null, bridgeJobError: '', bridgeJobs: [], jobCommands: [], selectedJobCommandId: 'health_check', jobBusy: false, bridgeJobResult: null,
   renderServices: [], renderError: '', renderFetchedAt: '', openRouterStatus: null, openRouterError: '',
   manusPrompt: '', manusTaskBusy: false, manusTaskError: '', manusTaskResult: readLastManusTask(),
   manusProgressBusy: false, manusProgressError: '', manusTaskProgress: null,
@@ -114,10 +116,25 @@ function bridgeStatus() {
     ? { cls: 'online', text: `${state.overview.devices.online} محطة تتصل حاليًا` }
     : { cls: 'warning', text: 'لا توجد محطة بنبض حديث' };
 }
+function bridgeJobStatusText() {
+  const config = state.bridgeJobConfig;
+  if (!config) return state.bridgeJobError ? 'حالة مشغّل HMAC غير متاحة' : 'بانتظار حالة مشغّل HMAC';
+  if (config.enabled) return 'مشغّل HMAC محلي مفعّل';
+  if (config.reason === 'hmac_secret_missing') return 'سر HMAC غير مهيأ';
+  return 'مشغّل HMAC المحلي غير مفعّل';
+}
+function bridgeJobExplanation() {
+  const config = state.bridgeJobConfig;
+  if (config?.enabled) return 'حالة التنفيذ والتوقيع تظهر في سجل المهام.';
+  if (config?.reason === 'hmac_secret_missing') return 'يلزم سر HMAC صالح على الخادم قبل قبول أي مهمة.';
+  if (!config && state.bridgeJobError) return 'تعذر قراءة الإعدادات المحمية للمشغّل.';
+  return 'يتطلب التفعيل تأكيد تشغيل نسخة واحدة ووضع التخزين الذاكري المحدود.';
+}
 async function loadLiveData() {
-  const [overview, devices, requests, security, keys, executions, commandCatalog, openRouter] = await Promise.allSettled([
+  const [overview, devices, requests, security, keys, executions, commandCatalog, openRouter, bridgeJobs, jobCatalog] = await Promise.allSettled([
     apiRequest('/api/control/overview'), apiRequest('/api/control/devices'), apiRequest('/api/control/requests'),
     apiRequest('/api/control/security'), apiRequest('/api/control/keys'), apiRequest('/api/control/executions'), apiRequest('/api/commands'), apiRequest('/api/control/openrouter/status'),
+    apiRequest('/api/control/jobs'), apiRequest('/api/control/jobs/commands'),
   ]);
   state.live = overview.status === 'fulfilled';
   state.liveError = overview.status === 'rejected' ? overview.reason.message : '';
@@ -141,6 +158,11 @@ async function loadLiveData() {
   }
   state.openRouterStatus = openRouter.status === 'fulfilled' ? openRouter.value : null;
   state.openRouterError = openRouter.status === 'rejected' ? openRouter.reason.message : '';
+  state.bridgeJobConfig = bridgeJobs.status === 'fulfilled' ? bridgeJobs.value : null;
+  state.bridgeJobError = bridgeJobs.status === 'rejected' ? bridgeJobs.reason.message : '';
+  state.bridgeJobs = bridgeJobs.status === 'fulfilled' && Array.isArray(bridgeJobs.value.jobs) ? bridgeJobs.value.jobs : [];
+  state.jobCommands = jobCatalog.status === 'fulfilled' && Array.isArray(jobCatalog.value.commands) ? jobCatalog.value.commands : [];
+  if (!state.jobCommands.some((command) => command.id === state.selectedJobCommandId)) state.selectedJobCommandId = state.jobCommands[0]?.id || '';
   state.lastSync = state.live ? new Date().toISOString() : '';
   render();
 }
@@ -229,8 +251,9 @@ function renderDashboard() {
   const openRouterState = state.openRouterStatus?.configured ? 'مهيأ على الخادم' : state.openRouterError ? 'حالة الإعداد غير متاحة' : state.openRouterStatus ? 'غير مهيأ' : 'بانتظار المصدر';
   const openRouterTest = ({ success: 'نجح آخر اختبار', failed: 'فشل آخر اختبار', not_run: 'لم يُجر اختبار بعد' })[state.openRouterStatus?.lastTest?.status] || 'حالة الاختبار غير متاحة';
   const openRouterModel = state.openRouterStatus?.model || 'غير محدد';
-  return `${sectionTitle('NEXORA · Linux Bridge', 'مركز تشغيل الجسر', 'اختر أمرًا من قائمة الخادم المسموحة، راجع مدخلاته، ثم تابع حالة التنفيذ ومخرجاته وسجل التدقيق.', `${button('تحديث البيانات', 'button secondary', 'refresh-data', 'refresh')}`)}
+  return `${sectionTitle('NEXORA · Linux Bridge', 'مركز تشغيل الجسر', 'اختر أمرًا من قائمة الخادم المسموحة، راجع مدخلاته، ثم تابع حالة التنفيذ ومخرجاته وسجل التدقيق.', `${button('مهام HMAC', 'button secondary', 'go-jobs', 'shield')}${button('تحديث البيانات', 'button secondary', 'refresh-data', 'refresh')}`)}
     ${renderStatusBanner()}
+    <div class="ops-banner info"><span class="ops-banner-icon">${icon('shield', 18)}</span><div class="ops-banner-copy"><strong>${escapeHtml(bridgeJobStatusText())}</strong><p>المهام الجديدة تُنفّذ على خدمة Render نفسها فقط؛ لا يوجد مضيف Linux خارجي مؤكد الاتصال. ${escapeHtml(bridgeJobExplanation())}</p></div>${button('فتح المهام الموقعة', 'button secondary', 'go-jobs', 'arrow')}</div>
     <div class="workbench-grid">
       <section class="panel ops-panel command-panel workbench-main">${renderCommandForm(true)}</section>
       <div class="workbench-side">
@@ -269,6 +292,35 @@ function renderCommandResult() {
 function renderCommandCatalog() {
   const cards = state.commands.map((command) => `<button type="button" class="catalog-command-card ${command.id === state.selectedCommandId ? 'selected' : ''}" data-select-command="${escapeHtml(command.id)}"><span class="catalog-card-top"><strong>${escapeHtml(command.title)}</strong><code>${escapeHtml(command.id)}</code></span><span class="catalog-card-description">${escapeHtml(command.description || 'لا يوجد وصف وارد من الخادم.')}</span><span class="catalog-card-meta">${(command.inputs || []).length ? `${(command.inputs || []).length} مدخلات من تعريف الأمر` : 'لا يتطلب مدخلات'}${command.serviceAction ? ` · ${escapeHtml(actionLabel[command.serviceAction.operation])} ${escapeHtml(command.serviceAction.service)}` : ''}</span></button>`).join('');
   return `${sectionTitle('العمليات / مصدر الخادم', 'كتالوج الأوامر', 'العناصر التالية تُعرض كما أعادتها واجهة /api/commands بعد التحقق من جلسة الإدارة؛ لا توجد أوامر محلية تجريبية.', `${button('إعادة تحميل المصدر', 'button secondary', 'refresh-data', 'refresh')}`)}${cards ? `<section class="command-catalog-list" aria-label="قائمة الأوامر الفعلية">${cards}</section>` : ''}<section class="panel ops-panel command-page">${renderCommandForm(false)}</section>${renderCommandResult()}<div class="ops-banner info"><div class="ops-banner-icon">${icon('shield', 19)}</div><div class="ops-banner-copy"><strong>حدود التنفيذ</strong><p>كل طلب يتطلب جلسة المدير ومعرّفًا موجودًا فعليًا في قائمة الخادم. لا يقبل هذا المركز نص shell حرًا، ولا يرسل مفاتيح الإدارة إلى المتصفح.</p></div></div>`;
+}
+function renderSignedJobRow(job) {
+  const labels = { success: 'نجحت', failed: 'فشلت', timeout: 'انتهت المهلة', output_limit: 'تجاوزت حد المخرجات', spawn_error: 'تعذر البدء', rejected: 'مرفوضة', running: 'قيد التنفيذ' };
+  const successful = job.status === 'success';
+  const waiting = job.status === 'running';
+  const when = job.completedAt || job.createdAt;
+  return `<div class="execution-row"><span class="execution-mark ${successful ? 'ok' : waiting ? 'wait' : 'bad'}">${icon(successful ? 'check' : waiting ? 'activity' : 'alert', 15)}</span><div class="execution-copy"><strong>${escapeHtml(job.commandId)}</strong><small><code>${escapeHtml(job.jobId)}</code> · ${escapeHtml(job.executor || 'local_render')}</small></div><span class="execution-status ${successful ? 'ok' : ''}">${escapeHtml(labels[job.status] || job.status || 'غير معروف')}</span><time>${escapeHtml(fmtDate(when))}</time></div>`;
+}
+function renderSignedJobResult() {
+  const job = state.bridgeJobResult;
+  if (!job) return '';
+  const status = job.status === 'success' ? 'اكتملت المهمة' : job.status === 'running' ? 'المهمة قيد التنفيذ' : `حالة المهمة: ${job.status || 'غير معروفة'}`;
+  const stdout = job.result?.stdout || '';
+  const stderr = job.result?.stderr || '';
+  return `<section class="panel command-result"><div class="panel-head result-heading"><div><h2>نتيجة المهمة الموقّعة</h2><p>${escapeHtml(job.commandId)} · ${escapeHtml(job.jobId)}</p></div><div class="result-heading-actions"><span class="execution-state-pill ${job.status === 'success' ? 'success' : job.status === 'running' ? 'running' : 'failed'}">${escapeHtml(status)}</span><button class="button secondary" data-action="clear-job-result" type="button">مسح العرض</button></div></div><div class="result-meta"><span>المشغّل: <code>${escapeHtml(job.executor || 'local_render')}</code></span>${Number.isFinite(job.durationMs) ? `<span>المدة: <code>${escapeHtml(job.durationMs)} ms</code></span>` : ''}<span>الطالب: <code>${escapeHtml(job.requestedBy || 'nexora-control-center')}</code></span></div><div class="result-output">${stdout ? `<strong>stdout</strong><pre>${escapeHtml(stdout)}</pre>` : ''}${stderr ? `<strong class="stderr-label">stderr</strong><pre class="stderr">${escapeHtml(stderr)}</pre>` : ''}${!stdout && !stderr ? '<div class="result-no-output">لا توجد مخرجات نصية.</div>' : ''}</div></section>`;
+}
+function renderSignedJobsPage() {
+  const config = state.bridgeJobConfig;
+  const enabled = config?.enabled === true;
+  const selected = state.jobCommands.find((command) => command.id === state.selectedJobCommandId) || state.jobCommands[0];
+  const options = state.jobCommands.map((command) => `<option value="${escapeHtml(command.id)}" ${command.id === selected?.id ? 'selected' : ''}>${escapeHtml(command.title || command.id)}</option>`).join('');
+  const statusText = bridgeJobStatusText();
+  const rows = state.bridgeJobs.map(renderSignedJobRow).join('');
+  return `${sectionTitle('NEXORA · جسر HMAC', 'مهام موقّعة', 'يرسل مركز التحكم مهمة محددة عبر HMAC إلى مشغّل محلي داخل خدمة NEXORA على Render.', `${button('تحديث البيانات', 'button secondary', 'refresh-data', 'refresh')}`)}
+    <div class="ops-banner ${enabled ? 'ok' : 'warning'}"><span class="ops-banner-icon">${icon(enabled ? 'shield' : 'alert', 18)}</span><div class="ops-banner-copy"><strong>${escapeHtml(statusText)}</strong><p>المشغّل الحالي محلي داخل خدمة Render فقط؛ لا يوجد مضيف Linux خارجي متصل، ولن تُنفذ أوامر عليه. حماية nonce وjobId حاليًا داخل ذاكرة عملية واحدة وتُمسح عند إعادة التشغيل؛ يلزم Redis مشترك قبل التوسع أو الاعتماد على dedupe دائم.</p></div><div class="ops-banner-side"><span class="mini-status ${enabled ? 'online' : 'warning'}">${enabled ? 'مشغّل محلي' : 'غير مفعّل'}</span></div></div>
+    <div class="ops-layout"><section class="panel ops-panel command-panel"><div class="panel-head"><div><h2>إرسال مهمة موقّعة</h2><p>يختار الخادم الأمر من القائمة المسموحة ويضيف هوية المرسل والتوقيع؛ لا يقبل endpoint أي shell أو args أو env من المتصفح.</p></div><span class="panel-icon">${icon('shield', 18)}</span></div>
+      ${state.bridgeJobError ? `<div class="empty-state compact"><h3>تعذر قراءة قائمة المهام</h3><p>${escapeHtml(state.bridgeJobError)}</p></div>` : state.jobCommands.length ? `<div class="command-console"><label class="command-select-label" for="bridge-job-command-select">الأمر المسموح</label><select id="bridge-job-command-select" ${state.jobBusy ? 'disabled' : ''}>${options}</select><div class="command-description"><strong>${escapeHtml(selected?.title || 'فحص صحة الخدمة')}</strong><p>${escapeHtml(selected?.description || 'فحص محلي آمن لخدمة NEXORA الحالية.')}</p></div><button type="button" class="button primary run-button" data-action="submit-signed-job" ${!enabled || state.jobBusy || !selected ? 'disabled' : ''}>${icon(state.jobBusy ? 'activity' : 'play', 16)}<span>${state.jobBusy ? 'جارٍ إرسال المهمة…' : 'إرسال مهمة موقّعة'}</span></button><p class="command-safety-note">يولّد المتصفح jobId فقط؛ يوقّع الخادم بايتات JSON الخام ويعيد nonce جديدًا عند كل إرسال. احتفاظ idempotency محدود زمنيًا.</p></div>` : `<div class="empty-state compact"><h3>لا توجد أوامر مهام</h3><p>يتوفر فحص الخدمة المدمج فقط عند تفعيل وضع النسخة الواحدة؛ لا توجد أوامر خارجية موصولة.</p></div>`}
+    </section><section class="panel ops-panel"><div class="panel-head"><div><h2>آخر المهام</h2><p>آخر 50 سجلًا محتفظًا بها في ذاكرة العملية الحالية.</p></div><span class="panel-icon">${icon('activity', 18)}</span></div><div class="execution-list">${rows || '<div class="empty-state compact"><h3>لا توجد مهام منفذة</h3><p>لا يُنشأ سجل حتى يرسل المدير مهمة موقّعة.</p></div>'}</div></section></div>${renderSignedJobResult()}
+    <div class="ops-banner info"><span class="ops-banner-icon">${icon('layers', 18)}</span><div class="ops-banner-copy"><strong>نطاق التنفيذ الحالي</strong><p>المسار المحلي مفيد لفحص الخدمة وتجربة بروتوكول HMAC. ربط مضيف Linux فعلي يتطلب عنوانًا وعميلًا منفصلًا مع Redis مشترك وسياسة TLS/mTLS؛ لن يُفترض وجوده أو تُخمن وجهته.</p></div></div>`;
 }
 function renderDevices() {
   const filtered = state.stations.filter((device) => (state.deviceFilter === 'all' || device.status === state.deviceFilter) && `${device.id} ${device.name || ''} ${device.region || ''}`.toLowerCase().includes(state.search.toLowerCase()));
@@ -364,13 +416,14 @@ function renderModal() {
 function render() {
   let content = renderDashboard();
   if (state.section === 'commands') content = renderCommandCatalog();
+  if (state.section === 'jobs') content = renderSignedJobsPage();
   if (state.section === 'devices') content = renderDevices();
   if (state.section === 'requests') content = renderRequests();
   if (state.section === 'security') content = renderSecurity();
   if (state.section === 'executions') content = renderExecutions();
   if (state.section === 'render') content = renderRenderServices();
   if (state.section === 'manus') content = renderManus();
-  if (state.section === 'integration') content = renderIntegration();
+  if (state.section === 'integration') content = `${renderIntegration()}${renderBridgeJobIntegration()}`;
   if (state.section === 'settings') content = renderSettings();
   app.innerHTML = renderShell(content);
   bindEvents();
@@ -401,6 +454,7 @@ function bindEvents() {
   document.querySelectorAll('[data-action]').forEach((element) => element.addEventListener('click', () => handleAction(element.dataset.action, element)));
   document.querySelectorAll('[data-modal-content]').forEach((element) => element.addEventListener('click', (event) => event.stopPropagation()));
   document.querySelector('#command-select')?.addEventListener('change', (event) => { state.selectedCommandId = event.target.value; render(); });
+  document.querySelector('#bridge-job-command-select')?.addEventListener('change', (event) => { state.selectedJobCommandId = event.target.value; render(); });
   document.querySelector('#manus-task-message')?.addEventListener('input', (event) => {
     state.manusPrompt = event.target.value;
     const counter = document.querySelector('.manus-form-meta span:last-child');
@@ -475,6 +529,53 @@ async function executeCommand(commandId, args = {}, confirmed = false) {
     state.commandResult = { commandId, title: command.title, ok: false, error: error.message, code: `HTTP ${error.status || '?'}`, executedAt: new Date().toISOString() };
     await loadLiveData();
     showToast(error.message);
+  }
+}
+function createBridgeJobId() {
+  if (typeof window.crypto?.randomUUID === 'function') return window.crypto.randomUUID().replace(/-/g, '').toLowerCase();
+  if (typeof window.crypto?.getRandomValues !== 'function') throw new Error('يتطلب إنشاء jobId عشوائي اتصالًا آمنًا بالمتصفح.');
+  const bytes = new Uint8Array(16);
+  window.crypto.getRandomValues(bytes);
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+async function submitSignedJob() {
+  if (state.jobBusy) return;
+  const command = state.jobCommands.find((item) => item.id === state.selectedJobCommandId);
+  if (!command) return showToast('لا يوجد أمر مهيأ للمهام الموقعة');
+  if (!state.bridgeJobConfig?.enabled) return showToast('التنفيذ متوقف حتى تأكيد نسخة واحدة وتهيئة التخزين المحدود');
+  const storageKey = `nexora-pending-bridge-job:${command.id}`;
+  let jobId = '';
+  try { jobId = window.sessionStorage.getItem(storageKey) || ''; } catch {}
+  if (!/^[a-f0-9]{32}$/i.test(jobId)) {
+    try { jobId = createBridgeJobId(); } catch (error) { return showToast(error.message); }
+    try { window.sessionStorage.setItem(storageKey, jobId); } catch {}
+  }
+  state.jobBusy = true;
+  state.bridgeJobResult = null;
+  render();
+  try {
+    const response = await apiRequest('/api/control/jobs', {
+      method: 'POST',
+      body: JSON.stringify({ jobId, commandId: command.id }),
+    });
+    state.bridgeJobResult = response.job || null;
+    if (response.job?.status !== 'running') {
+      try { window.sessionStorage.removeItem(storageKey); } catch {}
+    }
+    await loadLiveData();
+    showToast(response.job?.status === 'success' ? 'اكتمل الفحص المحلي الموقّع' : 'وصلت استجابة المهمة؛ راجع الحالة والمخرجات');
+  } catch (error) {
+    state.bridgeJobResult = error.body?.job || null;
+    if (error.body?.job && error.body.job.status !== 'running') {
+      try { window.sessionStorage.removeItem(storageKey); } catch {}
+    } else if (Number.isInteger(error.status) && error.status >= 400 && error.status < 500 && error.status !== 429) {
+      try { window.sessionStorage.removeItem(storageKey); } catch {}
+    }
+    await loadLiveData();
+    showToast(error.message || 'تعذر إرسال المهمة؛ إعادة المحاولة ستستخدم jobId نفسه.');
+  } finally {
+    state.jobBusy = false;
+    render();
   }
 }
 async function createKey() {
@@ -554,9 +655,11 @@ function handleAction(action) {
   else if (action === 'close-modal') { if (state.modal?.type === 'confirm-run') state.executionStatus = 'cancelled'; state.modal = null; render(); }
   else if (action === 'refresh-data') loadLiveData();
   else if (action === 'refresh-render') loadRenderServices();
+  else if (action === 'go-jobs') { state.section = 'jobs'; render(); }
   else if (action === 'go-devices') { state.section = 'devices'; render(); }
   else if (action === 'go-executions') { state.section = 'executions'; render(); }
   else if (action === 'clear-result') { state.commandResult = null; state.executionStatus = 'idle'; render(); }
+  else if (action === 'clear-job-result') { state.bridgeJobResult = null; render(); }
   else if (action === 'copy-output') {
     const text = [state.commandResult?.stdout, state.commandResult?.stderr].filter(Boolean).join('\n\n');
     if (!text) return showToast('لا توجد مخرجات لنسخها');
@@ -564,6 +667,7 @@ function handleAction(action) {
     navigator.clipboard.writeText(text).then(() => showToast('نُسخت المخرجات')).catch(() => showToast('تعذر نسخ المخرجات'));
   }
   else if (action === 'run-selected') executeCommand(state.selectedCommandId, collectCommandArgs(), false);
+  else if (action === 'submit-signed-job') submitSignedJob();
   else if (action === 'submit-manus-task') submitManusTask();
   else if (action === 'refresh-manus-task') refreshManusTask();
   else if (action === 'confirm-run') { const modal = state.modal; if (modal?.commandId) executeCommand(modal.commandId, modal.args || {}, true); }
@@ -571,3 +675,15 @@ function handleAction(action) {
   else if (action === 'confirm-key') createKey();
 }
 bootstrap();
+
+function renderBridgeJobIntegration() {
+  const config = state.bridgeJobConfig;
+  const enabled = config?.enabled === true;
+  const remoteConnected = config?.remoteLinuxAgentConnected === true;
+  return `<section class="panel ops-panel hmac-guide"><div class="panel-head"><div><h2>وظائف HMAC · المشغّل المحلي</h2><p>تفاصيل الطرفين داخل خدمة NEXORA الحالية، من دون إنشاء صفحة أو خدمة منفصلة.</p></div><span class="mini-status ${enabled ? 'online' : 'warning'}">${enabled ? 'التوقيع مفعّل' : 'التنفيذ موقوف'}</span></div><div class="bridge-status-list"><div><span>المشغّل</span><code>${escapeHtml(config?.executor || 'local_render')}</code></div><div><span>مضيف Linux خارجي</span>${statusPill(remoteConnected ? 'online' : 'offline', remoteConnected ? 'متصل' : 'لا يوجد اتصال مؤكد')}</div><div><span>التخزين</span><code>${escapeHtml(config?.storage || 'bounded_process_memory')}</code></div><div><span>الاحتفاظ بالنتائج</span><code>${Number(config?.retentionSeconds || 86400)} ثانية</code></div></div><div class="bridge-endpoints"><div><code>POST /api/control/jobs</code><span>جلسة مدير · body يحتوي jobId وcommandId فقط</span></div><div><code>POST /internal/jobs</code><span>nonce جديد وتوقيع HMAC · بايتات الجسم الخام</span></div></div><div class="code-window"><div class="code-top"><span><i></i><i></i><i></i></span><small>HMAC-SHA256 · /internal/jobs</small></div><pre>POST
+/internal/jobs
+&lt;timestamp&gt;
+&lt;nonce&gt;
+&lt;raw JSON body&gt;
+HMAC(secret, method + "\\n" + path + "\\n" + timestamp + "\\n" + nonce + "\\n" + rawBody)</pre></div><div class="panel-footnote">لا تُعرض قيمة السر ولا تُرسل للمتصفح. nonce والـ jobId محدودان بذاكرة العملية وتُمسح حالتهما بعد إعادة التشغيل؛ لا يوجد مضيف Linux خارجي مؤكد الاتصال.</div></section>`;
+}

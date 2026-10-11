@@ -24,6 +24,16 @@ import {
   overview,
   upsertDevice,
 } from "./control-store.js";
+import {
+  createBridgeJobState,
+  createInternalJobsRouter,
+  DEFAULT_JOB_MAX_OUTPUT_BYTES,
+  DEFAULT_JOB_MAX_DURATION_MS,
+  DEFAULT_JOB_TTL_MS,
+  INTERNAL_JOB_PATH,
+  parseJobClockSkewSeconds,
+  signBridgeRequest,
+} from "./bridge-jobs.js";
 
 dotenv.config();
 const app = express();
@@ -33,10 +43,26 @@ const frontendDir = path.resolve(__dirname, "../frontend");
 const PORT = Number(process.env.PORT || 8787);
 const configuredCommandsFile = process.env.COMMANDS_FILE || "./commands.json";
 const COMMANDS_FILE = path.isAbsolute(configuredCommandsFile) ? configuredCommandsFile : path.resolve(__dirname, configuredCommandsFile);
-const CLOCK_SKEW = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
+const configuredClockSkew = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
+const CLOCK_SKEW = Number.isFinite(configuredClockSkew) && configuredClockSkew > 0 ? configuredClockSkew : 300;
+const JOB_CLOCK_SKEW = parseJobClockSkewSeconds(process.env.NEXORA_JOB_CLOCK_SKEW_SECONDS || "60");
 const DANGEROUS = /[;&|`$<>\u0000-\u001f\u007f]/;
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || false, credentials: true }));
+const bridgeJobState = createBridgeJobState();
+app.use("/internal/jobs", createInternalJobsRouter({
+  secretProvider: () => process.env.NEXORA_BRIDGE_JOBS_MODE === "single_instance_memory"
+    ? process.env.NEXORA_BRIDGE_HMAC_SECRET || ""
+    : "",
+  state: bridgeJobState,
+  resolveCommand: resolveBridgeJobCommand,
+  executeCommand: executeLocalBridgeCommand,
+  clockSkewSeconds: JOB_CLOCK_SKEW,
+  maxOutputBytes: DEFAULT_JOB_MAX_OUTPUT_BYTES,
+  maxDurationMs: DEFAULT_JOB_MAX_DURATION_MS,
+  onLog: (record) => console.info(JSON.stringify(record)),
+}));
+// The signed internal route must capture exact bytes before the global JSON parser.
 app.use(express.json({ limit: "1mb", verify: (req, _res, buffer) => { req.rawBody = Buffer.from(buffer); } }));
 
 function loadCommands() {
@@ -49,7 +75,8 @@ function loadCommands() {
       const invalidParams = command?.params !== undefined && (
         !Array.isArray(command.params) || !command.params.every((param) => typeof param === "string")
       );
-      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || typeof command.exec !== "string" || invalidParams) {
+      const invalidJobFlag = command?.internalJob !== undefined && typeof command.internalJob !== "boolean";
+      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || typeof command.exec !== "string" || invalidParams || invalidJobFlag) {
         return { configured: false, reason: "invalid", commands: [] };
       }
       ids.add(command.id);
@@ -70,6 +97,93 @@ function publicCommand(command) {
   const result = { id: command.id, title: command.title, description: command.description || "", inputs: [...inputs].map((name) => ({ name })) };
   if (command.serviceAction) result.serviceAction = { operation: command.serviceAction.operation, service: command.serviceAction.service };
   return result;
+}
+const builtInHealthCheck = Object.freeze({
+  id: "health_check",
+  title: "فحص صحة خدمة NEXORA",
+  description: "يفحص عملية Node المحلية على خدمة Render فقط؛ لا يتصل بمضيف Linux خارجي.",
+  timeoutMs: 5_000,
+  builtin: "health_check",
+});
+const SHELL_EXECUTABLES = new Set(["sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh"]);
+function isBridgeJobCommand(command) {
+  if (!command || command.internalJob !== true || command.serviceAction) return false;
+  if (SHELL_EXECUTABLES.has(path.basename(command.exec || "").toLowerCase())) return false;
+  return !(command.params || []).some((param) => /\{\{|\}\}/.test(param));
+}
+function listBridgeJobCommands() {
+  const catalog = loadCommands();
+  const configured = catalog.configured ? catalog.commands.filter(isBridgeJobCommand).map((command) => ({
+    id: command.id,
+    title: command.title,
+    description: command.description || "",
+  })) : [];
+  return [builtInHealthCheck, ...configured];
+}
+function resolveBridgeJobCommand(commandId) {
+  if (commandId === builtInHealthCheck.id) return builtInHealthCheck;
+  const catalog = loadCommands();
+  return catalog.configured ? catalog.commands.find((command) => command.id === commandId && isBridgeJobCommand(command)) || null : null;
+}
+function executeLocalBridgeCommand(command, { signal, maxOutputBytes = DEFAULT_JOB_MAX_OUTPUT_BYTES } = {}) {
+  if (command?.builtin === "health_check") {
+    const report = {
+      status: "ok",
+      runner: "local_render",
+      service: "nexora-terminal-control",
+      nodeVersion: process.version,
+      uptimeSeconds: Math.floor(process.uptime()),
+    };
+    return Promise.resolve({ status: "success", ok: true, code: 0, durationMs: 0, stdout: JSON.stringify(report), stderr: "" });
+  }
+  return new Promise((resolve) => {
+    const startedAt = Date.now();
+    const childEnv = {
+      PATH: process.env.PATH || "/usr/bin:/bin",
+      HOME: process.env.HOME || "/tmp",
+      TMPDIR: process.env.TMPDIR || "/tmp",
+      LANG: process.env.LANG || "C.UTF-8",
+    };
+    const child = spawn(command.exec, command.params || [], {
+      cwd: command.cwd || process.cwd(),
+      env: childEnv,
+      shell: false,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let stdout = "";
+    let stderr = "";
+    let outputBytes = 0;
+    let outputLimitReached = false;
+    let settled = false;
+    const appendBounded = (target, chunk) => {
+      if (settled) return;
+      const bytes = Buffer.from(chunk);
+      const remaining = Math.max(0, maxOutputBytes - outputBytes);
+      const kept = bytes.subarray(0, remaining);
+      target.value += kept.toString("utf8");
+      outputBytes += kept.length;
+      if (kept.length < bytes.length) {
+        outputLimitReached = true;
+        child.kill("SIGKILL");
+      }
+    };
+    const out = { get value() { return stdout; }, set value(value) { stdout = value; } };
+    const err = { get value() { return stderr; }, set value(value) { stderr = value; } };
+    const finish = (code, spawnError = false) => {
+      if (settled) return;
+      settled = true;
+      signal?.removeEventListener("abort", abortChild);
+      const status = spawnError ? "spawn_error" : outputLimitReached ? "output_limit" : code === 0 ? "success" : "failed";
+      resolve({ status, ok: status === "success", code: Number.isInteger(code) ? code : null, durationMs: Date.now() - startedAt, outputLimitReached, stdout, stderr: spawnError ? "Unable to execute whitelisted job" : stderr });
+    };
+    const abortChild = () => { if (!settled) child.kill("SIGKILL"); };
+    child.stdout.on("data", (chunk) => appendBounded(out, chunk));
+    child.stderr.on("data", (chunk) => appendBounded(err, chunk));
+    child.once("error", () => finish(null, true));
+    child.once("close", (code) => finish(code));
+    if (signal?.aborted) abortChild();
+    else signal?.addEventListener("abort", abortChild, { once: true });
+  });
 }
 function sanitizeArg(value) {
   const clipped = (value === undefined || value === null ? "" : String(value)).slice(0, 800);
@@ -239,6 +353,71 @@ app.get("/api/control/openrouter/status", requireControlKey, (_req, res) => {
     model: process.env.OPENROUTER_MODEL?.trim() || null,
     lastTest: { status: "not_run", testedAt: null },
   });
+});
+function bridgeJobConfiguration() {
+  const modeEnabled = process.env.NEXORA_BRIDGE_JOBS_MODE === "single_instance_memory";
+  const secretConfigured = Buffer.byteLength(process.env.NEXORA_BRIDGE_HMAC_SECRET || "", "utf8") >= 32;
+  const enabled = modeEnabled && secretConfigured;
+  return {
+    enabled,
+    executor: "local_render",
+    remoteLinuxAgentConnected: false,
+    storage: "bounded_process_memory",
+    retentionSeconds: Math.floor(DEFAULT_JOB_TTL_MS / 1000),
+    nonceRetentionSeconds: Math.floor(120_000 / 1000),
+    reason: enabled ? null : modeEnabled ? "hmac_secret_missing" : "single_instance_mode_not_enabled",
+  };
+}
+app.get("/api/control/jobs", requireControlKey, (_req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  res.json({ ...bridgeJobConfiguration(), jobs: bridgeJobState.listJobs(50) });
+});
+app.get("/api/control/jobs/commands", requireControlKey, (_req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  res.json({ ...bridgeJobConfiguration(), commands: listBridgeJobCommands() });
+});
+app.post("/api/control/jobs", requireControlKey, async (req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+  const body = req.body;
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).sort().join(",") !== "commandId,jobId") {
+    return res.status(400).json({ ok: false, error: "أرسل معرّف الوظيفة ومعرّف أمر الخادم فقط." });
+  }
+  if (typeof body.jobId !== "string" || !/^[a-f0-9]{32}$/i.test(body.jobId) || typeof body.commandId !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(body.commandId)) {
+    return res.status(400).json({ ok: false, error: "معرّف الوظيفة أو الأمر غير صالح." });
+  }
+  if (process.env.NEXORA_BRIDGE_JOBS_MODE !== "single_instance_memory") {
+    return res.status(503).json({ ok: false, configured: false, error: "Job execution is disabled until single-instance memory mode is confirmed and configured." });
+  }
+  const secret = process.env.NEXORA_BRIDGE_HMAC_SECRET || "";
+  if (Buffer.byteLength(secret, "utf8") < 32) {
+    return res.status(503).json({ ok: false, configured: false, error: "Bridge job signing is not configured." });
+  }
+  if (!resolveBridgeJobCommand(body.commandId)) return res.status(404).json({ ok: false, error: "Command is not on the server whitelist." });
+
+  const job = { jobId: body.jobId, commandId: body.commandId, requestedBy: "nexora-control-center" };
+  const rawBody = Buffer.from(JSON.stringify(job), "utf8");
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const nonce = crypto.randomBytes(18).toString("base64url");
+  const signature = signBridgeRequest({ secret, method: "POST", path: INTERNAL_JOB_PATH, timestamp, nonce, rawBody });
+  try {
+    const response = await fetch(`http://127.0.0.1:${PORT}${INTERNAL_JOB_PATH}`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-nexora-timestamp": timestamp,
+        "x-nexora-nonce": nonce,
+        "x-nexora-signature": signature,
+      },
+      body: rawBody,
+      signal: AbortSignal.timeout(DEFAULT_JOB_MAX_DURATION_MS + 5_000),
+    });
+    let result;
+    try { result = await response.json(); } catch { return res.status(502).json({ ok: false, error: "Local job runner returned an invalid response." }); }
+    return res.status(response.status).json(result);
+  } catch {
+    return res.status(503).json({ ok: false, error: "Local job runner is unavailable." });
+  }
 });
 app.post("/api/control/manus/tasks", requireControlKey, async (req, res) => {
   res.set("Cache-Control", "no-store, private");
