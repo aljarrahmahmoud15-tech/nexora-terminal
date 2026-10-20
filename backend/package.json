@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test security.test.js bridge-jobs.test.js"
+    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js"
   },
   "dependencies": {
     "cors": "^2.8.5",

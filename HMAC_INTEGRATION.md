@@ -31,6 +31,10 @@ HMAC-SHA256(secret, timestamp + "." + rawRequestBody)
 
 لا تُعدّل هذه الصيغة عند ترقية عميل طرفية قائم. يقبل الخادم افتراضيًا انحرافًا يصل إلى 300 ثانية (`HMAC_CLOCK_SKEW_SECONDS`) ويحسب حالة الاتصال من آخر heartbeat موثق.
 
+### نبضة ذاتية من خدمة Render
+
+يمكن للخدمة نفسها إرسال heartbeat موثق إلى نقطة التحكم بعد ضبط `NEXORA_SELF_HEARTBEAT_ENABLED=true` و`NEXORA_SELF_HEARTBEAT_URL` على عنوان `POST /api/terminal/heartbeat`. تستخدم الحلقة `NEXORA_BRIDGE_HMAC_SECRET` ومعرّف `nexora-linux-bridge-prod`، وترسل نبضة فور بدء العملية ثم كل 120 ثانية افتراضيًا (`NEXORA_SELF_HEARTBEAT_INTERVAL_SECONDS`). لا تُسجل قيمة السر أو التوقيع، وتبقى الحلقة متوقفة افتراضيًا. تعود تلقائيًا بعد إعادة تشغيل العملية، لكنها لا تعمل أثناء توقف خدمة Render بالكامل.
+
 ## البروتوكول الجديد: وظائف داخل NEXORA
 
 التدفق:
