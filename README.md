@@ -23,6 +23,7 @@ npm start
 - صيغة التوقيع: `HMAC-SHA256(secret, timestamp + "." + rawRequestBody)`؛ راجع [HMAC_INTEGRATION.md](HMAC_INTEGRATION.md) للعقد الكامل.
 - تُحسب حالة الاتصال من آخر نبضة موثقة؛ الافتراضي أن تصبح العقدة غير متصلة بعد 300 ثانية (`HEARTBEAT_STALE_SECONDS`).
 - عند غياب المفتاح أو النبضة تعرض الواجهة «غير مهيأ» أو «بانتظار أول نبض» بدل العدادات الافتراضية.
+- يمكن تفعيل نبضة ذاتية من عملية Render نفسها عبر `NEXORA_SELF_HEARTBEAT_ENABLED=true` و`NEXORA_SELF_HEARTBEAT_URL=https://nexora-terminal-control.onrender.com/api/terminal/heartbeat`. تستخدم الحلقة `NEXORA_BRIDGE_HMAC_SECRET` الموجود على الخادم، ترسل نبضة فور بدء العملية ثم كل 120 ثانية افتراضيًا، ولا تسجل السر أو التوقيع. هذه آلية داخل العملية وتستأنف تلقائيًا بعد إعادة التشغيل؛ لا يمكنها إبقاء الجهاز متصلًا أثناء توقف خدمة Render بالكامل.
 
 ## مهام HMAC الموقّعة
 

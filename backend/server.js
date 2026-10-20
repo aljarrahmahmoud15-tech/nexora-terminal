@@ -34,6 +34,7 @@ import {
   parseJobClockSkewSeconds,
   signBridgeRequest,
 } from "./bridge-jobs.js";
+import { startSelfHeartbeat } from "./self-heartbeat.js";
 
 dotenv.config();
 const app = express();
@@ -674,6 +675,7 @@ if (fs.existsSync(frontendDir)) app.use(express.static(frontendDir, { index: "in
 app.get("*", (req, res, next) => { if (req.path.startsWith("/api/")) return next(); const indexPath = path.join(frontendDir, "index.html"); if (fs.existsSync(indexPath)) return res.sendFile(indexPath); res.status(404).json({ ok: false, error: "Frontend not installed" }); });
 
 app.listen(PORT, "0.0.0.0", () => {
+  startSelfHeartbeat();
   console.log(`NEXORA COMMAND · META-BOT NODE listening on :${PORT}`);
   console.log(`Commands file: ${COMMANDS_FILE}`);
 });
