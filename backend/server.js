@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import https from "node:https";
 import path from "node:path";
+import os from "node:os";
 import crypto from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { createManusTask, getManusTaskProgress, MANUS_TASK_MAX_CHARS } from "./manus-api.js";
@@ -39,6 +40,17 @@ import { startSelfHeartbeat } from "./self-heartbeat.js";
 dotenv.config();
 const app = express();
 app.set("trust proxy", 1);
+app.disable("x-powered-by");
+app.use((_req, res, next) => {
+  res.set({
+    "Content-Security-Policy": "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; img-src 'self' data:; font-src 'self' https://fonts.gstatic.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; script-src 'self'; connect-src 'self'",
+    "Referrer-Policy": "no-referrer",
+    "X-Content-Type-Options": "nosniff",
+    "X-Frame-Options": "DENY",
+    "Permissions-Policy": "camera=(), microphone=(), geolocation=()",
+  });
+  next();
+});
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const frontendDir = path.resolve(__dirname, "../frontend");
 const PORT = Number(process.env.PORT || 8787);
@@ -658,7 +670,31 @@ function ghRequest(method, requestPath, token, body) {
 }
 function ghGetSha(owner, repo, filePath, branch, token) { return ghRequest("GET", `/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(branch)}`, token).then((json) => json?.sha || null); }
 function ghPutContent(owner, repo, filePath, branch, token, content, message, sha) { const body = { message: message || "Update via NEXORA Bridge", content: Buffer.from(content, "utf8").toString("base64"), branch }; if (sha) body.sha = sha; return ghRequest("PUT", `/repos/${owner}/${repo}/contents/${encodeURIComponent(filePath)}`, token, body); }
-function runGit(args, cwd) { return new Promise((resolve) => { const child = spawn("git", args, { cwd: cwd || process.cwd(), shell: false }); let stdout = ""; let stderr = ""; child.stdout.on("data", (data) => { stdout += data.toString(); }); child.stderr.on("data", (data) => { stderr += data.toString(); }); child.on("close", (code) => resolve({ code, stdout, stderr })); }); }
+function runGit(args, cwd, options = {}) {
+  return new Promise((resolve) => {
+    const child = spawn("git", args, {
+      cwd: cwd || process.cwd(),
+      shell: false,
+      env: options.env || process.env,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (data) => { stdout += data.toString(); });
+    child.stderr.on("data", (data) => { stderr += data.toString(); });
+    child.on("close", (code) => resolve({ code, stdout, stderr }));
+  });
+}
+function createGitAskPass(token) {
+  const askPassPath = path.join(os.tmpdir(), `nexora-git-askpass-${crypto.randomBytes(16).toString("hex")}`);
+  fs.writeFileSync(askPassPath, "#!/bin/sh\nprintf '%s\n' \"$NEXORA_GIT_TOKEN\"\n", { mode: 0o700 });
+  const env = {
+    ...process.env,
+    GIT_ASKPASS: askPassPath,
+    GIT_TERMINAL_PROMPT: "0",
+    NEXORA_GIT_TOKEN: token,
+  };
+  return { env, cleanup: () => { try { fs.rmSync(askPassPath, { force: true }); } catch {} } };
+}
 
 app.post("/api/github/sync-commands", requireControlKey, async (_req, res) => {
   try { const owner = process.env.GITHUB_OWNER || ""; const repo = process.env.GITHUB_REPO || ""; const branch = process.env.GITHUB_BRANCH || "main"; const token = process.env.GITHUB_TOKEN || ""; const destination = process.env.GITHUB_PATH || "backend/commands.json"; if (!owner || !repo || !token) return res.status(400).json({ ok: false, error: "Missing GitHub configuration" }); const content = fs.existsSync(COMMANDS_FILE) ? fs.readFileSync(COMMANDS_FILE, "utf8") : "[]"; const sha = await ghGetSha(owner, repo, destination, branch, token).catch(() => null); const result = await ghPutContent(owner, repo, destination, branch, token, content, "Sync commands.json", sha); res.json({ ok: true, url: result?.content?.html_url || "", message: `Synced to ${owner}/${repo}:${branch}/${destination}` }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
@@ -667,9 +703,35 @@ app.post("/api/github/create-repo", requireControlKey, async (_req, res) => {
   try { const token = process.env.GITHUB_TOKEN || ""; const repo = process.env.GITHUB_REPO || ""; const isPrivate = String(process.env.GITHUB_PRIVATE || "true") === "true"; if (!token || !repo) return res.status(400).json({ ok: false, error: "Missing GitHub token or repo" }); await ghRequest("POST", "/user/repos", token, { name: repo, private: isPrivate, auto_init: false }).catch((error) => { if (!String(error?.message || "").includes("already exists")) throw error; }); res.json({ ok: true, message: "Repository ensured" }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
 });
 app.post("/api/github/connect", requireControlKey, async (_req, res) => {
-  try { const token = process.env.GITHUB_TOKEN || ""; const owner = process.env.GITHUB_OWNER || ""; const repo = process.env.GITHUB_REPO || ""; const branch = process.env.GITHUB_BRANCH || "main"; const remoteName = process.env.GIT_REMOTE_NAME || "origin"; if (!token || !owner || !repo) return res.status(400).json({ ok: false, error: "Missing GitHub configuration" }); const url = `https://${token}@github.com/${owner}/${repo}.git`; await runGit(["init"]); await runGit(["config", "user.name", process.env.GIT_USER_NAME || "NEXORA"]); await runGit(["config", "user.email", process.env.GIT_USER_EMAIL || "noreply@nexora.local"]); const added = await runGit(["remote", "add", remoteName, url]); if (added.code !== 0) await runGit(["remote", "set-url", remoteName, url]); await runGit(["add", "-A"]); await runGit(["commit", "-m", "Initial commit"]); await runGit(["branch", "-M", branch]); res.json({ ok: true, message: "Connected to remote" }); } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
+  try {
+    const token = process.env.GITHUB_TOKEN || "";
+    const owner = process.env.GITHUB_OWNER || "";
+    const repo = process.env.GITHUB_REPO || "";
+    const branch = process.env.GITHUB_BRANCH || "main";
+    const remoteName = process.env.GIT_REMOTE_NAME || "origin";
+    if (!token || !owner || !repo) return res.status(400).json({ ok: false, error: "Missing GitHub configuration" });
+    const url = `https://github.com/${owner}/${repo}.git`;
+    await runGit(["init"]);
+    await runGit(["config", "user.name", process.env.GIT_USER_NAME || "NEXORA"]);
+    await runGit(["config", "user.email", process.env.GIT_USER_EMAIL || "noreply@nexora.local"]);
+    const added = await runGit(["remote", "add", remoteName, url]);
+    if (added.code !== 0) await runGit(["remote", "set-url", remoteName, url]);
+    await runGit(["add", "-A"]);
+    await runGit(["commit", "-m", "Initial commit"]);
+    await runGit(["branch", "-M", branch]);
+    res.json({ ok: true, message: "Connected to remote without storing the GitHub token" });
+  } catch (error) { res.status(400).json({ ok: false, error: String(error?.message || error) }); }
 });
-app.post("/api/github/push", requireControlKey, async (_req, res) => { const remoteName = process.env.GIT_REMOTE_NAME || "origin"; const branch = process.env.GIT_BRANCH || process.env.GITHUB_BRANCH || "main"; const result = await runGit(["push", "-u", remoteName, branch]); res.json({ ok: result.code === 0, code: result.code, stdout: result.stdout, stderr: result.stderr }); });
+app.post("/api/github/push", requireControlKey, async (_req, res) => {
+  const remoteName = process.env.GIT_REMOTE_NAME || "origin";
+  const branch = process.env.GIT_BRANCH || process.env.GITHUB_BRANCH || "main";
+  const token = process.env.GITHUB_TOKEN || "";
+  const auth = token ? createGitAskPass(token) : null;
+  try {
+    const result = await runGit(["push", "-u", remoteName, branch], undefined, auth ? { env: auth.env } : {});
+    res.json({ ok: result.code === 0, code: result.code, stdout: result.stdout, stderr: result.stderr });
+  } finally { auth?.cleanup(); }
+});
 
 if (fs.existsSync(frontendDir)) app.use(express.static(frontendDir, { index: "index.html" }));
 app.get("*", (req, res, next) => { if (req.path.startsWith("/api/")) return next(); const indexPath = path.join(frontendDir, "index.html"); if (fs.existsSync(indexPath)) return res.sendFile(indexPath); res.status(404).json({ ok: false, error: "Frontend not installed" }); });
