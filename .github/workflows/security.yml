@@ -23,6 +23,7 @@ jobs:
           cache: npm
           cache-dependency-path: backend/package-lock.json
       - run: npm ci
+      - run: npm run check:all
       - run: npm test
       - run: node --check server.js
       - run: node --check bridge-jobs.js
