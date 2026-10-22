@@ -56,6 +56,11 @@ before(async () => {
     exec: process.execPath,
     params: ['-e', 'process.stdout.write(process.argv[1] || "")', '{{value}}'],
     exampleArgs: { internalNote: 'CANARY_SECRET_SHOULD_STAY_SERVER_SIDE' },
+  }, {
+    id: 'runtime_info',
+    title: 'Runtime information',
+    builtin: 'runtime_info',
+    timeoutMs: 5000,
   }]));
   const port = await freePort();
   base = `http://127.0.0.1:${port}`;
@@ -119,7 +124,7 @@ test('command catalog exposes only the whitelist, requires explicit service conf
   assert.equal(catalogResponse.status, 200);
   const catalog = await catalogResponse.json();
   assert.equal(catalog.configured, true);
-  assert.equal(catalog.commands.length, 2);
+  assert.equal(catalog.commands.length, 3);
   assert.equal(catalog.commands[0].id, actionCommandId);
   assert.equal('exec' in catalog.commands[0], false);
   assert.equal('params' in catalog.commands[0], false);
@@ -145,6 +150,16 @@ test('command catalog exposes only the whitelist, requires explicit service conf
   assert.equal((await safeArgument.json()).stdout, 'plain operator value');
   const unsafeArgument = await fetch(`${base}/api/run`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'test_safe_argument', args: { value: '$(not-allowed)' } }) });
   assert.equal(unsafeArgument.status, 400);
+
+  const runtimeInfo = await fetch(`${base}/api/run`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'runtime_info' }) });
+  assert.equal(runtimeInfo.status, 200);
+  const runtimeResult = await runtimeInfo.json();
+  assert.equal(runtimeResult.operation, 'builtin');
+  assert.match(runtimeResult.stdout, /nexora-terminal-control/);
+  assert.doesNotMatch(JSON.stringify(runtimeResult), /\/usr\/bin\/node|"exec"/);
+
+  const runtimeWithArgs = await fetch(`${base}/api/run`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'runtime_info', args: { value: 'unexpected' } }) });
+  assert.equal(runtimeWithArgs.status, 400);
 
   const logResponse = await fetch(`${base}/api/control/executions`, { headers: { cookie } });
   const { executions, retention } = await logResponse.json();
