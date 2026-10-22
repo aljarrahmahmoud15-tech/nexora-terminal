@@ -137,6 +137,9 @@ test('command catalog exposes only the whitelist, requires explicit service conf
   assert.equal(result.stdout, 'whitelist-ok');
   assert.equal(result.operation, 'restart');
 
+  const missingArgument = await fetch(`${base}/api/run`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'test_safe_argument' }) });
+  assert.equal(missingArgument.status, 400);
+
   const safeArgument = await fetch(`${base}/api/run`, { method: 'POST', headers: { cookie, 'content-type': 'application/json' }, body: JSON.stringify({ commandId: 'test_safe_argument', args: { value: 'plain operator value' } }) });
   assert.equal(safeArgument.status, 200);
   assert.equal((await safeArgument.json()).stdout, 'plain operator value');

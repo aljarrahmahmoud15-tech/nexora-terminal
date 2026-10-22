@@ -60,6 +60,8 @@ const configuredClockSkew = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
 const CLOCK_SKEW = Number.isFinite(configuredClockSkew) && configuredClockSkew > 0 ? configuredClockSkew : 300;
 const JOB_CLOCK_SKEW = parseJobClockSkewSeconds(process.env.NEXORA_JOB_CLOCK_SKEW_SECONDS || "60");
 const DANGEROUS = /[;&|`$<>\u0000-\u001f\u007f]/;
+const SHELL_EXECUTABLES = new Set(["sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh"]);
+const ALLOWED_COMMAND_ENV = new Set(["LANG", "LC_ALL", "TZ"]);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || false, credentials: true }));
 const bridgeJobState = createBridgeJobState();
@@ -89,7 +91,12 @@ function loadCommands() {
         !Array.isArray(command.params) || !command.params.every((param) => typeof param === "string")
       );
       const invalidJobFlag = command?.internalJob !== undefined && typeof command.internalJob !== "boolean";
-      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || typeof command.exec !== "string" || invalidParams || invalidJobFlag) {
+      const invalidEnv = command?.env !== undefined && (
+        !command.env || typeof command.env !== "object" || Array.isArray(command.env) ||
+        Object.entries(command.env).some(([key, value]) => !ALLOWED_COMMAND_ENV.has(key) || typeof value !== "string" || value.length > 200)
+      );
+      const invalidExecutable = typeof command?.exec !== "string" || !command.exec.trim() || SHELL_EXECUTABLES.has(path.basename(command.exec).toLowerCase());
+      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || invalidExecutable || invalidParams || invalidJobFlag || invalidEnv) {
         return { configured: false, reason: "invalid", commands: [] };
       }
       ids.add(command.id);
@@ -118,7 +125,6 @@ const builtInHealthCheck = Object.freeze({
   timeoutMs: 5_000,
   builtin: "health_check",
 });
-const SHELL_EXECUTABLES = new Set(["sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh"]);
 function isBridgeJobCommand(command) {
   if (!command || command.internalJob !== true || command.serviceAction) return false;
   if (SHELL_EXECUTABLES.has(path.basename(command.exec || "").toLowerCase())) return false;
@@ -629,6 +635,10 @@ app.post("/api/run", requireControlKey, async (req, res) => {
     const args = req.body?.args;
     if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args))) return res.status(400).json({ ok: false, error: "args must be an object" });
     const safeArgs = args || {};
+    const requiredInputs = new Set((command.params || []).flatMap((param) => [...param.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((match) => match[1])));
+    for (const input of requiredInputs) {
+      if (!Object.prototype.hasOwnProperty.call(safeArgs, input)) return res.status(400).json({ ok: false, error: `Missing command input: ${input}` });
+    }
     const finalParams = (command.params || []).map((param) => typeof param === "string" ? param.replace(/\{\{(\w+)\}\}/g, (_, key) => sanitizeArg(safeArgs[key])) : "");
     const requestedTimeout = Number(command.timeoutMs || 120000);
     const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1000, Math.min(requestedTimeout, 300000)) : 120000;
