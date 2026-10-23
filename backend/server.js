@@ -350,7 +350,16 @@ function requireHmac(req, res, next) {
   next();
 }
 
-app.get("/health", (_req, res) => res.json({ ok: true, service: "nexora-terminal-control" }));
+app.get("/health", (_req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.status(200).json({
+    ok: true,
+    service: "nexora-terminal-control",
+    uptimeSeconds: Math.floor(process.uptime()),
+    node: process.version,
+    timestamp: new Date().toISOString(),
+  });
+});
 
 // Live admin data: protect these with CONTROL_API_KEY in production.
 app.get("/api/control/overview", requireControlKey, (_req, res) => res.json(overview()));
@@ -736,8 +745,23 @@ app.post("/api/github/push", requireControlKey, async (_req, res) => {
 if (fs.existsSync(frontendDir)) app.use(express.static(frontendDir, { index: "index.html" }));
 app.get("*", (req, res, next) => { if (req.path.startsWith("/api/")) return next(); const indexPath = path.join(frontendDir, "index.html"); if (fs.existsSync(indexPath)) return res.sendFile(indexPath); res.status(404).json({ ok: false, error: "Frontend not installed" }); });
 
-app.listen(PORT, "0.0.0.0", () => {
+const server = app.listen(PORT, "0.0.0.0", () => {
   startSelfHeartbeat();
   console.log(`NEXORA COMMAND · META-BOT NODE listening on :${PORT}`);
   console.log(`Commands file: ${COMMANDS_FILE}`);
 });
+
+function shutdown(signal) {
+  console.log(JSON.stringify({ level: "info", msg: "shutdown_start", signal }));
+  server.close((err) => {
+    if (err) {
+      console.error(JSON.stringify({ level: "error", msg: "shutdown_error", error: String(err.message || err) }));
+      process.exit(1);
+    }
+    console.log(JSON.stringify({ level: "info", msg: "shutdown_complete" }));
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10_000).unref();
+}
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

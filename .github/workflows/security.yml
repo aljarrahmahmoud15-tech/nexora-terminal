@@ -17,13 +17,20 @@ jobs:
         working-directory: backend
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: backend/package-lock.json
+
       - run: npm ci
-      - run: npm test
-      - run: node --check server.js
-      - run: node --check bridge-jobs.js
-      - run: npm audit --omit=dev --audit-level=high
+
+      - name: Syntax check
+        run: npm run check:syntax
+
+      - name: Unit tests
+        run: npm test
+
+      - name: Production audit
+        run: npm run audit:prod

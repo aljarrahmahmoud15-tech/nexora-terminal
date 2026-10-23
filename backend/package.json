@@ -2,9 +2,15 @@
   "name": "nexora-bridge",
   "type": "module",
   "private": true,
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "start": "node server.js",
-    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js"
+    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js",
+    "check:syntax": "node --check server.js && node --check bridge-jobs.js && node --check control-store.js && node --check manus-api.js && node --check manus-webhook.js && node --check self-heartbeat.js",
+    "check:all": "npm run check:syntax && npm test",
+    "audit:prod": "npm audit --omit=dev --audit-level=high"
   },
   "dependencies": {
     "cors": "^2.8.5",
