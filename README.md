@@ -68,7 +68,24 @@ npm start
 
 يستقبل `POST /api/manus/webhook` إشعاري `task_created` و`task_stopped` فقط. عنوان callback الثابت بعد النشر هو `https://nexora-terminal-control.onrender.com/api/manus/webhook`. يتحقق الخادم من `X-Webhook-Signature` بتوقيع RSA-SHA256 على البايتات الخام، وطابع زمني ضمن 5 دقائق، ومفتاح Manus العام المخزّن مؤقتًا لمدة ساعة. تُزال إعادة الإرسال بواسطة `event_id`؛ ولا تُحوّل حمولة webhook أو عنوان المهمة أو العنوان أو الرسائل أو المرفقات إلى سجل أو بث. لا يُبث إلى الجلسة الإدارية إلا `{taskId,eventType}` عبر `GET /api/control/manus/tasks/:taskId/events`؛ بعدها يقرأ المتصفح التفاصيل من واجهة الحالة المحمية. لا تُعالج إلا معرفات أنشأها NEXORA، وتُحفظ ملكية المعرفات في ذاكرة العملية حتى 7 أيام؛ إذا أعيد تشغيل الخدمة، يبقى التحقق اليدوي بإيصال المهمة متاحًا لكن لا يُستأنف بث webhook لتلك المعرفات القديمة.
 
-قسم Render قراءة فقط؛ لا ينفذ نشرًا أو إيقافًا أو إعادة تشغيل. لا تُجرَ أي تغييرات على إعدادات Render تلقائيًا.
+## إدارة Render المقيّدة
+
+يبقى قسم Render للقراءة فقط افتراضيًا. يعرض جرد الخدمات وآخر حالة Deploy ولا ينفذ أي تغيير ما لم تُفعّل سياسة العمليات صراحةً في بيئة الخادم. لتفعيل تحكم محدود، اضبط `RENDER_MUTATIONS_ENABLED=1`، ثم ضع معرّفات الخدمات المسموحة فقط في `RENDER_ALLOWED_SERVICE_IDS`، والعمليات المطلوبة فقط في `RENDER_ALLOWED_OPERATIONS`؛ لا يُقرأ أي من هذه القيم من المتصفح.
+
+العمليات المدعومة هي `restart` و`deploy` و`rollback` عبر واجهة Render الرسمية. كل طلب إلى `POST /api/control/render/actions` يتطلب جلسة المدير، و`same-origin`، و`operationId`، ومعرّف خدمة مطابقًا للـ allowlist، وعملية مضمّنة، و`confirmed: true`. يدعم المسار `dryRun: true` بلا استدعاء Render، ويحتفظ بنتيجة العملية في ذاكرة محدودة لمنع التكرار داخل نفس تشغيل الخدمة. كل محاولة تُسجّل في سجل التنفيذ دون تسجيل مفتاح Render أو محتوى الأسرار.
+
+مثال إعداد آمن بعد مراجعة معرّفات الخدمات الفعلية:
+
+```ini
+RENDER_API_KEY=ضعه في أسرار Render فقط
+RENDER_MUTATIONS_ENABLED=1
+RENDER_ALLOWED_SERVICE_IDS=srv-example1,srv-example2
+RENDER_ALLOWED_OPERATIONS=restart,deploy
+```
+
+لا تضع كل خدمات الحساب في allowlist. ابدأ بخدمة اختبار واحدة، استخدم `dryRun`، ثم فعّل `restart` فقط. أضف `deploy` أو `rollback` بعد تحديد سياسة نشر ونسخة احتياطية ومراجعة مستقلة. لا تغيّر هذه المتغيرات من واجهة NEXORA، ولا توجد واجهة لتعديل Environment Variables أو تنفيذ Shell حر.
+
+عمليات WhatsApp الخاصة بالجلسة وQR والمجموعات والمحافظ لا تُستنتج من زر Render عام. تحتاج Adapter خاصًا بالخدمة مع فحص قراءة أولًا، و`dryRun`، وسجل تدقيق، وإجراء owner-only منفصل لأي تغيير مالي أو متعلق بالهوية.
 
 ## التحقق
 
