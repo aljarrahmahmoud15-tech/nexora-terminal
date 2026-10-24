@@ -1,0 +1,9 @@
+[
+  {
+    "id": "runtime_info",
+    "title": "معلومات تشغيل الخدمة",
+    "description": "قراءة إصدار Node ومدة تشغيل عملية NEXORA فقط",
+    "builtin": "runtime_info",
+    "timeoutMs": 5000
+  }
+]

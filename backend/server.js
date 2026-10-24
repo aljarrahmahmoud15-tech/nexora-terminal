@@ -60,6 +60,9 @@ const configuredClockSkew = Number(process.env.HMAC_CLOCK_SKEW_SECONDS || 300);
 const CLOCK_SKEW = Number.isFinite(configuredClockSkew) && configuredClockSkew > 0 ? configuredClockSkew : 300;
 const JOB_CLOCK_SKEW = parseJobClockSkewSeconds(process.env.NEXORA_JOB_CLOCK_SKEW_SECONDS || "60");
 const DANGEROUS = /[;&|`$<>\u0000-\u001f\u007f]/;
+const SHELL_EXECUTABLES = new Set(["sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh"]);
+const ALLOWED_COMMAND_ENV = new Set(["LANG", "LC_ALL", "TZ"]);
+const ALLOWED_BUILTINS = new Set(["runtime_info"]);
 
 app.use(cors({ origin: process.env.CORS_ORIGIN || false, credentials: true }));
 const bridgeJobState = createBridgeJobState();
@@ -85,11 +88,26 @@ function loadCommands() {
     if (!Array.isArray(parsed)) return { configured: false, reason: "invalid", commands: [] };
     const ids = new Set();
     for (const command of parsed) {
+      const hasBuiltin = typeof command?.builtin === "string";
       const invalidParams = command?.params !== undefined && (
         !Array.isArray(command.params) || !command.params.every((param) => typeof param === "string")
       );
       const invalidJobFlag = command?.internalJob !== undefined && typeof command.internalJob !== "boolean";
-      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || typeof command.exec !== "string" || invalidParams || invalidJobFlag) {
+      const invalidEnv = command?.env !== undefined && (
+        !command.env || typeof command.env !== "object" || Array.isArray(command.env) ||
+        Object.entries(command.env).some(([key, value]) => !ALLOWED_COMMAND_ENV.has(key) || typeof value !== "string" || value.length > 200)
+      );
+      const invalidExecutable = !hasBuiltin && (
+        typeof command?.exec !== "string" || !command.exec.trim() || !path.isAbsolute(command.exec) ||
+        SHELL_EXECUTABLES.has(path.basename(command.exec).toLowerCase())
+      );
+      const invalidBuiltin = command?.builtin !== undefined && (
+        !hasBuiltin || !ALLOWED_BUILTINS.has(command.builtin) || command.exec !== undefined || command.params !== undefined ||
+        command.cwd !== undefined || command.env !== undefined || command.internalJob !== undefined || command.serviceAction !== undefined
+      );
+      const invalidTimeout = command?.timeoutMs !== undefined && (!Number.isInteger(command.timeoutMs) || command.timeoutMs < 1000 || command.timeoutMs > 300000);
+      const invalidCwd = command?.cwd !== undefined && (typeof command.cwd !== "string" || !path.isAbsolute(command.cwd));
+      if (!command || typeof command.id !== "string" || !/^[a-zA-Z0-9_-]{1,80}$/.test(command.id) || ids.has(command.id) || typeof command.title !== "string" || invalidExecutable || invalidBuiltin || invalidParams || invalidJobFlag || invalidEnv || invalidTimeout || invalidCwd) {
         return { configured: false, reason: "invalid", commands: [] };
       }
       ids.add(command.id);
@@ -108,6 +126,7 @@ function loadCommands() {
 function publicCommand(command) {
   const inputs = new Set((command.params || []).flatMap((param) => [...param.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((match) => match[1])));
   const result = { id: command.id, title: command.title, description: command.description || "", inputs: [...inputs].map((name) => ({ name })) };
+  if (command.builtin) result.builtin = command.builtin;
   if (command.serviceAction) result.serviceAction = { operation: command.serviceAction.operation, service: command.serviceAction.service };
   return result;
 }
@@ -118,7 +137,6 @@ const builtInHealthCheck = Object.freeze({
   timeoutMs: 5_000,
   builtin: "health_check",
 });
-const SHELL_EXECUTABLES = new Set(["sh", "bash", "dash", "zsh", "fish", "cmd", "powershell", "pwsh"]);
 function isBridgeJobCommand(command) {
   if (!command || command.internalJob !== true || command.serviceAction) return false;
   if (SHELL_EXECUTABLES.has(path.basename(command.exec || "").toLowerCase())) return false;
@@ -629,6 +647,17 @@ app.post("/api/run", requireControlKey, async (req, res) => {
     const args = req.body?.args;
     if (args !== undefined && (!args || typeof args !== "object" || Array.isArray(args))) return res.status(400).json({ ok: false, error: "args must be an object" });
     const safeArgs = args || {};
+    const requiredInputs = new Set((command.params || []).flatMap((param) => [...param.matchAll(/\{\{([a-zA-Z0-9_]+)\}\}/g)].map((match) => match[1])));
+    for (const input of requiredInputs) {
+      if (!Object.prototype.hasOwnProperty.call(safeArgs, input)) return res.status(400).json({ ok: false, error: `Missing command input: ${input}` });
+    }
+    if (command.builtin === "runtime_info") {
+      if (Object.keys(safeArgs).length) return res.status(400).json({ ok: false, error: "Built-in commands do not accept arguments" });
+      const stdout = `${JSON.stringify({ node: process.version, uptimeSeconds: Math.floor(process.uptime()), service: "nexora-terminal-control" })}\n`;
+      const durationMs = Date.now() - startedAt;
+      addExecution({ commandId: command.id, title: command.title, operation: "builtin", service: null, status: "success", durationMs });
+      return res.json({ ok: true, commandId: command.id, title: command.title, operation: "builtin", service: null, code: 0, timedOut: false, durationMs, stdout, stderr: "" });
+    }
     const finalParams = (command.params || []).map((param) => typeof param === "string" ? param.replace(/\{\{(\w+)\}\}/g, (_, key) => sanitizeArg(safeArgs[key])) : "");
     const requestedTimeout = Number(command.timeoutMs || 120000);
     const timeoutMs = Number.isFinite(requestedTimeout) ? Math.max(1000, Math.min(requestedTimeout, 300000)) : 120000;
