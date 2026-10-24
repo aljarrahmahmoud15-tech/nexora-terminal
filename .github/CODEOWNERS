@@ -1,0 +1,25 @@
+# NEXORA CODEOWNERS
+# Temporary baseline: the repository currently has one real Write collaborator.
+# Replace the owner on each relevant line with trusted external reviewers or teams
+# after granting them Write access; do not use placeholder usernames.
+
+# Default owner for all files
+* @aljarrahmahmoud15-tech
+
+# Repository policy and automation
+/.github/ @aljarrahmahmoud15-tech
+/.github/workflows/ @aljarrahmahmoud15-tech
+/.github/CODEOWNERS @aljarrahmahmoud15-tech
+
+# Backend and security-sensitive paths
+/backend/ @aljarrahmahmoud15-tech
+/backend/server.js @aljarrahmahmoud15-tech
+/backend/control-store.js @aljarrahmahmoud15-tech
+/backend/bridge-jobs.js @aljarrahmahmoud15-tech
+/backend/commands.json @aljarrahmahmoud15-tech
+/backend/validate-commands.mjs @aljarrahmahmoud15-tech
+
+# Runtime and deployment
+/Dockerfile @aljarrahmahmoud15-tech
+/docker-compose.yml @aljarrahmahmoud15-tech
+/.nvmrc @aljarrahmahmoud15-tech

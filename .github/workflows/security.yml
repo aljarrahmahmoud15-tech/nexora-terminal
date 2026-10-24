@@ -1,29 +1,80 @@
-name: Backend security checks
+name: Security checks
 
 on:
   push:
     branches: [main]
+
   pull_request:
     branches: [main]
 
+  # يعمل عند استخدام GitHub Merge Queue
+  merge_group:
+    types: [checks_requested]
+
+  # تشغيل يدوي عند الحاجة
+  workflow_dispatch:
+
 permissions:
   contents: read
+  pull-requests: read
+
+concurrency:
+  group: security-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
-  test:
+  security:
+    name: security
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+
     defaults:
       run:
         working-directory: backend
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 22
+        uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: backend/package-lock.json
-      - run: npm ci
-      - run: npm test
-      - run: node --check server.js
-      - run: node --check bridge-jobs.js
-      - run: npm audit --omit=dev --audit-level=high
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Syntax check
+        run: npm run check:syntax
+
+      - name: Validate command catalog
+        shell: bash
+        run: |
+          if [ -f validate-commands.mjs ] && [ -f commands.json ]; then
+            node validate-commands.mjs commands.json
+
+            if [ -f commands.sample.json ]; then
+              node validate-commands.mjs commands.sample.json
+            fi
+          else
+            echo "Command catalog validator is not present; skipping."
+          fi
+
+      - name: Unit and security tests
+        run: npm test
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Dependency review
+        if: ${{ github.event_name == 'pull_request' }}
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+
+      - name: Docker build
+        if: ${{ hashFiles('Dockerfile') != '' }}
+        working-directory: .
+        run: docker build --pull --tag nexora-terminal:ci .
