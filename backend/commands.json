@@ -9,5 +9,38 @@
       "console.log(JSON.stringify({node:process.version, uptimeSeconds:Math.floor(process.uptime()), service:'nexora-terminal-control'}))"
     ],
     "timeoutMs": 5000
+  },
+  {
+    "id": "health_check",
+    "title": "فحص صحة الخدمة",
+    "description": "قراءة حالة خدمة NEXORA وإصدار Node ومدة التشغيل دون تعديل",
+    "exec": "/usr/bin/node",
+    "params": [
+      "-e",
+      "console.log(JSON.stringify({status:'ok', service:'nexora-terminal-control', node:process.version, uptimeSeconds:Math.floor(process.uptime()), checkedAt:new Date().toISOString()}))"
+    ],
+    "timeoutMs": 5000
+  },
+  {
+    "id": "process_metrics",
+    "title": "مقاييس العملية",
+    "description": "قراءة PID واستخدام الذاكرة ومدة التشغيل للعملية فقط",
+    "exec": "/usr/bin/node",
+    "params": [
+      "-e",
+      "const m=process.memoryUsage(); console.log(JSON.stringify({pid:process.pid, uptimeSeconds:Math.floor(process.uptime()), rssBytes:m.rss, heapUsedBytes:m.heapUsed, heapTotalBytes:m.heapTotal}))"
+    ],
+    "timeoutMs": 5000
+  },
+  {
+    "id": "runtime_platform",
+    "title": "منصة التشغيل",
+    "description": "قراءة إصدار Node ونظام التشغيل والمعمارية دون تعديل",
+    "exec": "/usr/bin/node",
+    "params": [
+      "-e",
+      "console.log(JSON.stringify({node:process.version, platform:process.platform, arch:process.arch, release:require('os').release()}))"
+    ],
+    "timeoutMs": 5000
   }
 ]
