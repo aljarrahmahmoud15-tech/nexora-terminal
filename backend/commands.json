@@ -3,7 +3,11 @@
     "id": "runtime_info",
     "title": "معلومات تشغيل الخدمة",
     "description": "قراءة إصدار Node ومدة تشغيل عملية NEXORA فقط",
-    "builtin": "runtime_info",
+    "exec": "/usr/bin/node",
+    "params": [
+      "-e",
+      "console.log(JSON.stringify({node:process.version, uptimeSeconds:Math.floor(process.uptime()), service:'nexora-terminal-control'}))"
+    ],
     "timeoutMs": 5000
   }
 ]
