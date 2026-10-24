@@ -28,3 +28,10 @@ jobs:
       - run: node --check server.js
       - run: node --check bridge-jobs.js
       - run: npm audit --omit=dev --audit-level=high
+
+      - name: Linux agent contract test
+        working-directory: .
+        run: |
+          python3 -m py_compile linux-agent/nexora-linux-agent.py
+          python3 -m unittest -v linux-agent/test_nexora_linux_agent.py
+          bash -n linux-agent/install.sh linux-agent/uninstall.sh
