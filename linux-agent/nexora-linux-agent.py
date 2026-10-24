@@ -96,7 +96,8 @@ def read_secret(secret_file: Path) -> bytes:
         mode = secret_file.stat().st_mode & 0o777
     except FileNotFoundError as exc:
         raise ConfigurationError(f"HMAC secret file does not exist: {secret_file}") from exc
-    if mode & 0o077:
+    # 0600 and 0640 are allowed; group write/execute and all other-user bits are not.
+    if mode & 0o037:
         raise ConfigurationError("HMAC secret file must be readable only by its owner and group")
     secret = secret_file.read_bytes().rstrip(b"\r\n")
     if len(secret) < MIN_SECRET_BYTES:

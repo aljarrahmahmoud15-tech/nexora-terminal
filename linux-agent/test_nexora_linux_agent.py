@@ -4,6 +4,7 @@ import hmac
 import importlib.util
 import json
 from pathlib import Path
+import tempfile
 import unittest
 
 MODULE_PATH = Path(__file__).with_name("nexora-linux-agent.py")
@@ -45,6 +46,17 @@ class LinuxAgentContractTest(unittest.TestCase):
         self.assertNotIn("command", body)
         self.assertNotIn("exec", body)
         self.assertNotIn("router_password", body)
+
+    def test_secret_file_allows_group_read_only_and_rejects_other_reads(self):
+        with tempfile.TemporaryDirectory() as directory:
+            secret_path = Path(directory) / "secret"
+            secret_path.write_bytes(self.secret)
+            secret_path.chmod(0o640)
+            self.assertEqual(agent.read_secret(secret_path), self.secret)
+
+            secret_path.chmod(0o644)
+            with self.assertRaises(agent.ConfigurationError):
+                agent.read_secret(secret_path)
 
 
 if __name__ == "__main__":
