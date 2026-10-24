@@ -36,6 +36,7 @@ import {
   signBridgeRequest,
 } from "./bridge-jobs.js";
 import { startSelfHeartbeat } from "./self-heartbeat.js";
+import { executeRenderAction, getRenderPolicy, listRenderServices } from "./render-ops.js";
 
 dotenv.config();
 const app = express();
@@ -589,41 +590,37 @@ app.get("/api/render/services", requireControlKey, async (_req, res) => {
   const token = process.env.RENDER_API_KEY || "";
   if (!token) return res.status(503).json({ ok: false, configured: false, error: "Render API key is not configured" });
   try {
-    const items = [];
-    let cursor;
-    for (let page = 0; page < 10; page++) {
-      const url = new URL("https://api.render.com/v1/services");
-      url.searchParams.set("limit", "100");
-      if (cursor) url.searchParams.set("cursor", cursor);
-      const response = await fetch(url, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(12_000), redirect: "error" });
-      if (!response.ok) return res.status(response.status === 401 || response.status === 403 ? 502 : 503).json({ ok: false, configured: true, error: "Unable to read Render services" });
-      const pageData = await response.json();
-      if (!Array.isArray(pageData)) throw new Error("Unexpected Render response");
-      for (const entry of pageData) {
-        const service = entry?.service;
-        if (!service || typeof service.id !== "string") continue;
-        items.push({ id: service.id, name: String(service.name || "Unknown"), type: String(service.type || "unknown"), url: typeof service.serviceDetails?.url === "string" ? service.serviceDetails.url : null, dashboardUrl: typeof service.dashboardUrl === "string" ? service.dashboardUrl : null, suspended: service.suspended === "suspended", updatedAt: service.updatedAt || null, region: service.serviceDetails?.region || null });
-      }
-      cursor = pageData.at(-1)?.cursor;
-      if (!cursor || pageData.length === 0) break;
-    }
-    for (let offset = 0; offset < items.length; offset += 10) {
-      await Promise.all(items.slice(offset, offset + 10).map(async (service) => {
-        try {
-          const deployUrl = new URL(`https://api.render.com/v1/services/${encodeURIComponent(service.id)}/deploys`);
-          deployUrl.searchParams.set("limit", "1");
-          const response = await fetch(deployUrl, { headers: { Accept: "application/json", Authorization: `Bearer ${token}` }, signal: AbortSignal.timeout(10_000), redirect: "error" });
-          if (!response.ok) return;
-          const entries = await response.json();
-          const deploy = Array.isArray(entries) ? entries[0]?.deploy : null;
-          if (deploy) service.latestDeploy = { status: String(deploy.status || "unknown"), createdAt: deploy.createdAt || null };
-        } catch { /* A per-service deploy status is optional; keep the service row. */ }
-      }));
-    }
-    res.json({ ok: true, readOnly: true, fetchedAt: new Date().toISOString(), count: items.length, services: items });
-  } catch {
-    res.status(503).json({ ok: false, configured: true, error: "Unable to reach Render API" });
+    res.json({ ok: true, readOnly: !getRenderPolicy().mutationsEnabled, ...(await listRenderServices({ token })) });
+  } catch (error) {
+    res.status(error?.upstreamStatus === 401 || error?.upstreamStatus === 403 ? 502 : 503).json({ ok: false, configured: true, error: "Unable to read Render services" });
   }
+});
+
+app.post("/api/control/render/actions", requireControlKey, async (req, res) => {
+  res.set("Cache-Control", "no-store, private");
+  if (!sameOrigin(req)) return res.status(403).json({ ok: false, error: "Same-origin request required" });
+  const body = req.body;
+  const allowedFields = ["action", "confirmed", "dryRun", "operationId", "serviceId"];
+  if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).some((key) => !allowedFields.includes(key))) {
+    return res.status(400).json({ ok: false, error: "Render action payload contains unsupported fields" });
+  }
+  const result = await executeRenderAction({
+    token: process.env.RENDER_API_KEY || "",
+    action: body.action,
+    confirmed: body.confirmed === true,
+    dryRun: body.dryRun === true,
+    operationId: body.operationId,
+    serviceId: body.serviceId,
+  });
+  addExecution({
+    operationId: body.operationId || null,
+    commandId: `render_${String(body.action || "unknown")}`,
+    service: typeof body.serviceId === "string" ? body.serviceId : "unknown",
+    operation: typeof body.action === "string" ? body.action : "unknown",
+    status: result.ok ? result.dryRun ? "dry_run" : result.duplicate ? "duplicate" : "success" : "rejected",
+    durationMs: 0,
+  });
+  return res.status(result.ok ? 200 : result.status || 400).json(result);
 });
 
 app.get("/api/commands", requireControlKey, (_req, res) => {
