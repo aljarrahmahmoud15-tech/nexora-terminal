@@ -267,7 +267,13 @@ test('Render remains read-only and does not contact upstream when its server key
   assert.doesNotMatch(body, /Authorization|Bearer/);
   const healthResponse = await fetch(`${base}/health`);
   assert.equal(healthResponse.status, 200);
-  assert.deepEqual(await healthResponse.json(), { ok: true, service: 'nexora-terminal-control' });
+  const health = await healthResponse.json();
+  assert.equal(health.ok, true);
+  assert.equal(health.service, 'nexora-terminal-control');
+  assert.equal(Number.isInteger(health.uptimeSeconds), true);
+  assert.ok(health.uptimeSeconds >= 0);
+  assert.match(health.node, /^v\d+/);
+  assert.equal(new Date(health.timestamp).toISOString(), health.timestamp);
 });
 
 test('Manus create/progress routes are authenticated, text-only, receipt-scoped, and use only the local mock', async () => {
