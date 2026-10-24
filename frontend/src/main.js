@@ -42,6 +42,7 @@ const navItems = [
 ];
 const statusLabel = { online: 'متصل', warning: 'تحذير', offline: 'غير متصل', verified: 'موثّق', rejected: 'مرفوض', expired: 'منتهي' };
 const actionLabel = { start: 'تشغيل', stop: 'إيقاف', restart: 'إعادة تشغيل', command: 'أمر مسموح' };
+const renderActionLabel = { restart: 'إعادة تشغيل', deploy: 'نشر', rollback: 'Rollback' };
 const executionLabel = { success: 'نجح', failed: 'فشل', timeout: 'انتهت المهلة', spawn_error: 'تعذر البدء', rejected: 'مرفوض', confirmation_required: 'ينتظر التأكيد' };
 function readLastManusTask() {
   try {
@@ -54,7 +55,7 @@ const state = {
   live: false, liveError: '', lastSync: '', overview: null, stations: [], requests: [], securityEvents: [], keys: [], executions: [],
   commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null, executionStatus: 'idle', executing: false,
   bridgeJobConfig: null, bridgeJobError: '', bridgeJobs: [], jobCommands: [], selectedJobCommandId: 'health_check', jobBusy: false, bridgeJobResult: null,
-  renderServices: [], renderError: '', renderFetchedAt: '', openRouterStatus: null, openRouterError: '',
+  renderServices: [], renderError: '', renderFetchedAt: '', renderPolicy: null, renderActionBusy: '', renderActionResult: null, openRouterStatus: null, openRouterError: '',
   manusPrompt: '', manusTaskBusy: false, manusTaskError: '', manusTaskResult: readLastManusTask(),
   manusProgressBusy: false, manusProgressError: '', manusTaskProgress: null,
 };
@@ -173,7 +174,9 @@ async function loadRenderServices() {
     const response = await apiRequest('/api/render/services');
     state.renderServices = Array.isArray(response.services) ? response.services : [];
     state.renderFetchedAt = response.fetchedAt || '';
+    state.renderPolicy = response.mutationPolicy || null;
   } catch (error) {
+    state.renderPolicy = null;
     state.renderError = error.status === 503 && error.body?.configured === false ? 'مفتاح Render غير مهيأ على الخادم.' : 'تعذرت قراءة خدمات Render من المصدر.';
   }
   render();
@@ -381,8 +384,13 @@ function renderSecurity() {
   return `${sectionTitle('السجلات / الأمن', 'أحداث الأمان', 'الأحداث الواردة إلى مخزن الجسر فقط؛ لا تُعرض درجة أمن أو أرقام تقديرية.', `${button('تحديث', 'button secondary', 'refresh-data', 'refresh')}`)}<div class="toolbar compact-toolbar"><div class="filter-pills">${[['all','كل المستويات'],['high','عالٍ'],['medium','متوسط'],['low','منخفض']].map(([key,label]) => `<button class="${state.securityFilter === key ? 'active' : ''}" data-security-filter="${key}">${label}</button>`).join('')}</div></div><section class="panel ops-panel full-panel">${filtered.length ? `<div class="event-list large-events">${filtered.map(renderSecurityEvent).join('')}</div>` : `<div class="empty-state">${icon('shield',28)}<h3>لا توجد أحداث أمان مسجلة</h3><p>ستظهر هنا أحداث الطرفية الموقعة والتنبيهات التي يسجلها الخادم.</p></div>`}</section>`;
 }
 function renderRenderServices() {
-  const cards = state.renderServices.map((service) => `<article class="render-service-card"><div><strong>${escapeHtml(service.name)}</strong><small>${escapeHtml(service.type)} · ${escapeHtml(service.region || 'المنطقة غير متاحة')}</small></div><span class="render-status ${service.suspended ? 'suspended' : 'active'}">${service.suspended ? 'معلّقة' : escapeHtml(service.latestDeploy?.status || 'حالة النشر غير معروفة')}</span><div class="render-service-meta"><code>${escapeHtml(service.id)}</code>${service.url ? `<a href="${escapeHtml(service.url)}" target="_blank" rel="noopener noreferrer">فتح الخدمة</a>` : ''}${service.dashboardUrl ? `<a href="${escapeHtml(service.dashboardUrl)}" target="_blank" rel="noopener noreferrer">لوحة Render</a>` : ''}</div></article>`).join('');
-  return `${sectionTitle('الإدارة / المصدر الخارجي', 'خدمات Render', 'قراءة فقط من واجهة Render؛ لا توجد عمليات نشر أو إعادة تشغيل من هذه الصفحة.', `${button('قراءة الآن', 'button secondary', 'refresh-render', 'refresh')}`)}<section class="panel ops-panel render-panel"><div class="panel-head"><div><h2>الخدمات المرتبطة</h2><p>${state.renderFetchedAt ? `آخر قراءة ${escapeHtml(fmtDate(state.renderFetchedAt))}` : 'لم تُقرأ بعد'}</p></div><span class="mini-status info">قراءة فقط</span></div>${state.renderError ? `<div class="empty-state compact"><h3>مصدر Render غير متاح</h3><p>${escapeHtml(state.renderError)}</p></div>` : cards || `<div class="empty-state compact"><h3>لم تُقرأ الخدمات بعد</h3><p>استخدم «قراءة الآن» لاستدعاء المصدر المتصل.</p></div>`}</section>`;
+  const cards = state.renderServices.map((service) => {
+    const operations = Array.isArray(service.allowedOperations) ? service.allowedOperations : [];
+    const actionButtons = operations.map((action) => `<button type="button" class="button secondary" data-action="render-action" data-render-action="${escapeHtml(action)}" data-render-service-id="${escapeHtml(service.id)}" ${state.renderActionBusy === `${service.id}:${action}` ? 'disabled' : ''}>${icon(action === 'restart' ? 'refresh' : action === 'deploy' ? 'play' : 'alert', 14)}<span>${state.renderActionBusy === `${service.id}:${action}` ? 'جارٍ…' : escapeHtml(renderActionLabel[action] || action)}</span></button>`).join('');
+    return `<article class="render-service-card"><div><strong>${escapeHtml(service.name)}</strong><small>${escapeHtml(service.type)} · ${escapeHtml(service.region || 'المنطقة غير متاحة')}</small></div><span class="render-status ${service.suspended ? 'suspended' : 'active'}">${service.suspended ? 'معلّقة' : escapeHtml(service.latestDeploy?.status || 'حالة النشر غير معروفة')}</span><div class="render-service-meta"><code>${escapeHtml(service.id)}</code>${service.url ? `<a href="${escapeHtml(service.url)}" target="_blank" rel="noopener noreferrer">فتح الخدمة</a>` : ''}${service.dashboardUrl ? `<a href="${escapeHtml(service.dashboardUrl)}" target="_blank" rel="noopener noreferrer">لوحة Render</a>` : ''}</div>${actionButtons ? `<div class="render-service-actions">${actionButtons}</div>` : ''}</article>`;
+  }).join('');
+  const policyText = state.renderPolicy?.mutationsEnabled ? `العمليات المسموحة: ${state.renderPolicy.allowedOperations.map((item) => renderActionLabel[item] || item).join('، ')} · تتطلب تأكيدًا` : 'قراءة فقط؛ لا توجد عمليات مؤثرة مفعّلة.';
+  return `${sectionTitle('الإدارة / المصدر الخارجي', 'خدمات Render', 'الجرد من Render للقراءة. عمليات التغيير تظهر فقط للخدمات المسموحة وتحتاج تأكيدًا صريحًا.', `${button('قراءة الآن', 'button secondary', 'refresh-render', 'refresh')}`)}<section class="panel ops-panel render-panel"><div class="panel-head"><div><h2>الخدمات المرتبطة</h2><p>${state.renderFetchedAt ? `آخر قراءة ${escapeHtml(fmtDate(state.renderFetchedAt))}` : 'لم تُقرأ بعد'}</p></div><span class="mini-status ${state.renderPolicy?.mutationsEnabled ? 'warning' : 'info'}">${state.renderPolicy?.mutationsEnabled ? 'تحكم مقيد' : 'قراءة فقط'}</span></div><div class="panel-footnote">${escapeHtml(policyText)}</div>${state.renderActionResult ? `<div class="ops-banner ${state.renderActionResult.ok ? 'ok' : 'warning'}"><div class="ops-banner-copy"><strong>${state.renderActionResult.ok ? 'تم قبول العملية' : 'تعذر تنفيذ العملية'}</strong><p>${escapeHtml(state.renderActionResult.error || `${renderActionLabel[state.renderActionResult.mutation] || state.renderActionResult.mutation || ''} · ${state.renderActionResult.serviceId || ''}`)}</p></div></div>` : ''}${state.renderError ? `<div class="empty-state compact"><h3>مصدر Render غير متاح</h3><p>${escapeHtml(state.renderError)}</p></div>` : cards || `<div class="empty-state compact"><h3>لم تُقرأ الخدمات بعد</h3><p>استخدم «قراءة الآن» لاستدعاء المصدر المتصل.</p></div>`}</section>`;
 }
 function renderManusProgress() {
   const progress = state.manusTaskProgress;
@@ -675,18 +683,52 @@ async function disableKey(id) {
   try { await apiRequest(`/api/control/keys/${encodeURIComponent(id)}/disable`, { method: 'POST', body: '{}' }); await loadLiveData(); showToast('تم تعطيل المفتاح'); }
   catch (error) { showToast(error.message); }
 }
+function renderOperationId() {
+  if (typeof window.crypto?.randomUUID === 'function') return window.crypto.randomUUID();
+  if (typeof window.crypto?.getRandomValues === 'function') {
+    const bytes = new Uint8Array(16);
+    window.crypto.getRandomValues(bytes);
+    return Array.from(bytes, (byte) => byte.toString(16).padStart(2, '0')).join('');
+  }
+  throw new Error('يتطلب تنفيذ عملية Render اتصالًا آمنًا بالمتصفح.');
+}
+async function performRenderAction(serviceId, action) {
+  if (state.renderActionBusy) return;
+  const service = state.renderServices.find((item) => item.id === serviceId);
+  if (!service || !Array.isArray(service.allowedOperations) || !service.allowedOperations.includes(action)) return showToast('العملية غير مسموحة لهذه الخدمة');
+  const label = renderActionLabel[action] || action;
+  if (!window.confirm(`سيتم تنفيذ «${label}» على خدمة Render: ${service.name}. قد تسبب العملية توقفًا أو نشرًا جديدًا. هل تؤكد؟`)) return;
+  state.renderActionBusy = `${serviceId}:${action}`;
+  state.renderActionResult = null;
+  render();
+  try {
+    state.renderActionResult = await apiRequest('/api/control/render/actions', {
+      method: 'POST',
+      body: JSON.stringify({ operationId: renderOperationId(), serviceId, action, confirmed: true }),
+    });
+    await loadRenderServices();
+    showToast('تم قبول عملية Render وتسجيلها');
+  } catch (error) {
+    state.renderActionResult = error.body || { ok: false, error: error.message };
+    showToast(error.message || 'تعذر تنفيذ عملية Render');
+  } finally {
+    state.renderActionBusy = '';
+    render();
+  }
+}
 function showToast(message) {
   state.toast = message;
   render();
   clearTimeout(window.__nexoraToastTimer);
   window.__nexoraToastTimer = setTimeout(() => { state.toast = ''; render(); }, 2800);
 }
-function handleAction(action) {
+function handleAction(action, element) {
   if (action === 'toggle-menu') { state.menuOpen = !state.menuOpen; render(); }
   else if (action === 'close-menu') { state.menuOpen = false; render(); }
   else if (action === 'close-modal') { if (state.modal?.type === 'confirm-run') state.executionStatus = 'cancelled'; state.modal = null; render(); }
   else if (action === 'refresh-data') loadLiveData();
   else if (action === 'refresh-render') loadRenderServices();
+  else if (action === 'render-action') performRenderAction(element?.dataset.renderServiceId, element?.dataset.renderAction);
   else if (action === 'go-jobs') { state.section = 'jobs'; render(); }
   else if (action === 'go-devices') { state.section = 'devices'; render(); }
   else if (action === 'go-executions') { state.section = 'executions'; render(); }
