@@ -64,6 +64,8 @@ test("restart uses the official endpoint, keeps the token server-side, and is id
   assert.equal(calls[0].options.method, "POST");
   assert.match(calls[0].options.headers.Authorization, /^Bearer /);
   assert.doesNotMatch(JSON.stringify(first), new RegExp(token));
+  const conflict = await executeRenderAction({ token, env: baseEnv, action: "deploy", operationId: "op-restart-123", serviceId, confirmed: true, fetchImpl });
+  assert.deepEqual(conflict, { ok: false, status: 409, error: "operationId was already used for a different Render action" });
 });
 
 test("deploy sends a non-destructive cache policy and blocks non-allowlisted services", async () => {

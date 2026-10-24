@@ -171,7 +171,10 @@ export async function executeRenderAction({ token, env = process.env, action, op
   if (!token || typeof token !== "string") return { ok: false, status: 503, error: "Render API key is not configured" };
   if (!policy.mutationsEnabled) return { ok: false, status: 503, error: "Render mutations are disabled" };
   const previous = mutationResults.get(operationId);
-  if (previous) return { ...previous, duplicate: true };
+  if (previous) {
+    if (previous.serviceId !== serviceId || previous.mutation !== action) return { ok: false, status: 409, error: "operationId was already used for a different Render action" };
+    return { ...previous, duplicate: true };
+  }
   try {
     const spec = RENDER_ACTIONS[action];
     const response = await renderFetch({ token, pathname: spec.path(serviceId), method: spec.method, body: spec.body, fetchImpl });
