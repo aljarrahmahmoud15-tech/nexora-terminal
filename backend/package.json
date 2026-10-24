@@ -4,7 +4,7 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js",
+    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js command-catalog.test.js",
     "check:all": "node --check server.js && node --check bridge-jobs.js && node --check self-heartbeat.js && node --check validate-commands.mjs && node validate-commands.mjs commands.json && node validate-commands.mjs commands.sample.json"
   },
   "dependencies": {
