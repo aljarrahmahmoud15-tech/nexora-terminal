@@ -42,5 +42,16 @@
       "console.log(JSON.stringify({node:process.version, platform:process.platform, arch:process.arch, release:require('os').release()}))"
     ],
     "timeoutMs": 5000
+  },
+  {
+    "id": "cpu_metrics",
+    "title": "مراقبة CPU",
+    "description": "قراءة حمل النظام وعدد الأنوية ونسبة CPU التقريبية لعملية NEXORA دون تعديل",
+    "exec": "/usr/bin/node",
+    "params": [
+      "-e",
+      "const fs=require('fs'),os=require('os'),pid=process.ppid,read=()=>{const p=fs.readFileSync('/proc/'+pid+'/stat','utf8').trim().split(/\\s+/),t=Number(p[13])+Number(p[14]),s=fs.readFileSync('/proc/stat','utf8').split('\\n')[0].trim().split(/\\s+/).slice(1).reduce((a,v)=>a+Number(v),0);return {t,s}};const a=read();setTimeout(()=>{const b=read(),dt=b.t-a.t,ds=b.s-a.s;console.log(JSON.stringify({pid,cpuCount:os.cpus().length,loadAverage:os.loadavg(),processCpuPercent:ds?Number((dt/ds*os.cpus().length*100).toFixed(2)):0,sampleMs:250}))},250)"
+    ],
+    "timeoutMs": 5000
   }
 ]
