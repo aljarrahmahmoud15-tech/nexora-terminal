@@ -47,6 +47,18 @@ npm start
 
 قبل اعتماد أي `commands.json` شغّل `npm run check:all` من مجلد `backend` أو شغّل `node validate-commands.mjs /مسار/commands.json` مباشرة. يفحص الأمران قائمة الإنتاج والعينة، ويرفض المدقق مفسرات shell، وبيئة التنفيذ غير المسموحة، والمسارات التنفيذية أو مسارات العمل النسبية، ومدخلات الأوامر الداخلية المتغيرة. لا يحتاج `runtime_info` إلى ملف تنفيذي لأنه built-in ينفذ القراءة داخل عملية NEXORA. لا يُعد `commands.sample.json` قائمة تشغيل تلقائية؛ هو نموذج يُراجع ويُنسخ فقط بعد التحقق من الملف التنفيذي الموجود على المضيف.
 
+## ربط Telegram
+
+يدعم NEXORA Webhook اختياريًا عبر `POST /api/telegram/webhook`. لا يُفعّل الربط إلا عند ضبط `TELEGRAM_ENABLED=1`، وتوفير `TELEGRAM_BOT_TOKEN` و`TELEGRAM_WEBHOOK_SECRET` بطول لا يقل عن 32 محرفًا، وتحديد `TELEGRAM_ALLOWED_CHAT_IDS` كقائمة أرقام محادثات صريحة مفصولة بفواصل. يُرسل Telegram ترويسة `X-Telegram-Bot-Api-Secret-Token`، ويرفض الخادم أي ترويسة أو محادثة غير مسموحة.
+
+الأوامر المتاحة عبر Telegram للقراءة فقط هي `/help` و`/runtime_info` و`/health_check`. لا تُمرَّر أوامر shell ولا معاملات المستخدم ولا أوامر `restart` أو `deploy` أو `rollback` إلى Telegram. تُزال تحديثات Telegram المكررة داخل ذاكرة العملية، ويُطبّق حد 30 رسالة في الدقيقة لكل محادثة. عنوان Webhook بعد النشر هو:
+
+```text
+https://nexora-terminal-control.onrender.com/api/telegram/webhook
+```
+
+بعد ضبط المتغيرات السرية على Render، سجّل العنوان مرة واحدة باستخدام Bot API `setWebhook` مع نفس قيمة `TELEGRAM_WEBHOOK_SECRET`. لا تضع توكن Telegram أو السر أو أرقام المحادثات الحساسة في Git أو السجلات. قبل فتح أي أوامر تغيّر الحالة، يجب إضافة موافقة صريحة، سجل تدقيق مستقل، وallowlist منفصل لكل عملية.
+
 ## واجهات الإدارة والجلسات
 
 تتطلب مسارات `/api/control/*` و`/api/commands` و`/api/run` جلسة المدير HttpOnly أو ترويسة إدارة موثوقة. تسجل الواجهة الدخول عبر `/api/auth/login` ولا تخزن المفتاح الإداري في JavaScript. تبقى أسرار HMAC ومفاتيح Render و`MANUS_API_KEY` على الخادم.
