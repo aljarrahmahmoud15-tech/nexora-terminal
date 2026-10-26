@@ -37,6 +37,7 @@ import {
 } from "./bridge-jobs.js";
 import { startSelfHeartbeat } from "./self-heartbeat.js";
 import { executeRenderAction, getRenderPolicy, listRenderServices } from "./render-ops.js";
+import { createTelegramWebhookHandler } from "./telegram-control.js";
 
 dotenv.config();
 const app = express();
@@ -217,6 +218,27 @@ function executeLocalBridgeCommand(command, { signal, maxOutputBytes = DEFAULT_J
     else signal?.addEventListener("abort", abortChild, { once: true });
   });
 }
+async function executeTelegramReadOnlyCommand(commandId) {
+  const startedAt = Date.now();
+  let result;
+  if (commandId === "runtime_info") {
+    result = {
+      ok: true,
+      stdout: JSON.stringify({ node: process.version, uptimeSeconds: Math.floor(process.uptime()), service: "nexora-terminal-control" }),
+      stderr: "",
+    };
+  } else if (commandId === "health_check") {
+    result = await executeLocalBridgeCommand(builtInHealthCheck);
+  } else {
+    result = { ok: false, error: "Telegram command is not available" };
+  }
+  addExecution({ commandId, title: `Telegram ${commandId}`, operation: "telegram_read_only", service: null, status: result.ok ? "success" : "failed", durationMs: Date.now() - startedAt, requestedBy: "telegram" });
+  return result;
+}
+app.post("/api/telegram/webhook", createTelegramWebhookHandler({
+  env: process.env,
+  executeCommand: executeTelegramReadOnlyCommand,
+}));
 function sanitizeArg(value) {
   const clipped = (value === undefined || value === null ? "" : String(value)).slice(0, 800);
   if (DANGEROUS.test(clipped)) throw new Error("Argument contains disallowed characters.");

@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js render-ops.test.js",
-    "check:all": "node --check server.js && node --check bridge-jobs.js && node --check self-heartbeat.js && node --check render-ops.js && node --check validate-commands.mjs && node validate-commands.mjs commands.json && node validate-commands.mjs commands.sample.json"
+    "test": "node --test security.test.js bridge-jobs.test.js self-heartbeat.test.js render-ops.test.js telegram-control.test.js",
+    "check:all": "node --check server.js && node --check bridge-jobs.js && node --check self-heartbeat.js && node --check render-ops.js && node --check telegram-control.js && node --check validate-commands.mjs && node validate-commands.mjs commands.json && node validate-commands.mjs commands.sample.json"
   },
   "dependencies": {
     "cors": "^2.8.5",
