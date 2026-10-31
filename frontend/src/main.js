@@ -28,7 +28,8 @@ const icon = (name, size = 19) => {
 
 const app = document.querySelector('#app');
 const navItems = [
-  { id: 'dashboard', label: 'المركز التشغيلي', icon: 'grid', group: 'العمليات' },
+  { id: 'center', label: 'المركز التجاري', icon: 'grid', group: 'المنتج' },
+  { id: 'dashboard', label: 'التحكم والجسر', icon: 'cpu', group: 'العمليات' },
   { id: 'commands', label: 'كتالوج الأوامر', icon: 'terminal', group: 'العمليات' },
   { id: 'jobs', label: 'مهام HMAC الموقّعة', icon: 'shield', group: 'العمليات' },
   { id: 'devices', label: 'البوتات والطبقات', icon: 'layers', group: 'العمليات' },
@@ -51,7 +52,7 @@ function readLastManusTask() {
   } catch { return null; }
 }
 const state = {
-  section: 'dashboard', menuOpen: false, modal: null, toast: '', search: '', deviceFilter: 'all', requestFilter: 'all', securityFilter: 'all',
+  section: 'center', menuOpen: false, modal: null, toast: '', search: '', deviceFilter: 'all', requestFilter: 'all', securityFilter: 'all',
   live: false, liveError: '', lastSync: '', overview: null, stations: [], requests: [], securityEvents: [], keys: [], executions: [],
   commandsConfigured: false, commandsReason: 'missing', commands: [], selectedCommandId: '', commandError: '', commandResult: null, executionStatus: 'idle', executing: false,
   bridgeJobConfig: null, bridgeJobError: '', bridgeJobs: [], jobCommands: [], selectedJobCommandId: 'health_check', jobBusy: false, bridgeJobResult: null,
@@ -220,9 +221,9 @@ function renderNav() {
 }
 function renderShell(content) {
   const bridge = bridgeStatus();
-  const dockIds = ['dashboard', 'commands', 'devices', 'executions'];
+  const dockIds = ['center', 'dashboard', 'commands', 'manus'];
   return `<div class="shell ${state.menuOpen ? 'menu-open' : ''}">
-    <aside class="sidebar"><div class="brand"><div class="brand-mark"><i></i><i></i></div><div><strong>NEXORA COMMAND</strong><small>LINUX BRIDGE · CONTROL</small></div></div>
+    <aside class="sidebar"><div class="brand"><div class="brand-mark"><i></i><i></i></div><div><strong>NEXSORA CENTER</strong><small>COMMAND · CONTROL</small></div></div>
       <div class="workspace-card"><span class="workspace-dot ${bridge.cls}"></span><div><small>اتصال الجسر</small><strong>${escapeHtml(bridge.text)}</strong></div>${icon('activity', 16)}</div>
       <nav class="main-nav">${renderNav()}</nav>
       <div class="sidebar-footer"><div class="uptime-line"><span class="status-dot ${bridge.cls}"></span><span>${escapeHtml(bridge.text)}</span><strong>${state.lastSync ? escapeHtml(relativeTime(state.lastSync)) : '—'}</strong></div><div class="profile"><div class="avatar">N</div><div><strong>جلسة مدير</strong><small>مصادقة الخادم</small></div>${icon('shield', 16)}</div></div>
@@ -431,6 +432,19 @@ HMAC(secret, timestamp + "." + rawRequestBody)</pre></div></section>`;
 function renderSettings() {
   return `${sectionTitle('الإدارة / أسرار التشغيل', 'الإعدادات والمفاتيح', 'قيم الخادم الحساسة لا تُعرض. إدارة مفاتيح الطرفية تتم ضمن جلسة المدير الموثقة.', `${button('إنشاء مفتاح طرفية', 'button primary', 'create-key', 'plus')}`)}<div class="ops-banner info"><div class="ops-banner-icon">${icon('shield',19)}</div><div class="ops-banner-copy"><strong>الأسرار تبقى على الخادم</strong><p>CONTROL_API_KEY وRENDER_API_KEY وNEXORA_KEYS_JSON وCOMMANDS_FILE تُدار في بيئة تشغيل الخادم، وليس من المتصفح.</p></div></div><section class="panel ops-panel keys-panel"><div class="panel-head"><div><h2>مفاتيح HMAC للطرفيات</h2><p>السر لا يظهر في القائمة. عند إنشاء مفتاح جديد يُعرض مرة واحدة فقط.</p></div></div>${state.keys.length ? `<div class="keys-list">${state.keys.map((key) => `<div class="key-row"><span class="key-symbol">${icon('key',18)}</span><div class="key-details"><strong>${escapeHtml(key.name)}</strong><code>${escapeHtml(key.id)}</code></div><span class="key-date">أُنشئ ${escapeHtml(fmtDate(key.created))}<small>آخر استخدام ${escapeHtml(fmtDate(key.lastUsed))}</small></span>${statusPill(key.status, key.status === 'active' ? 'فعال' : 'معطل')}<button class="icon-button" data-disable-key="${escapeHtml(key.id)}" ${key.status !== 'active' ? 'disabled' : ''} aria-label="تعطيل المفتاح">${icon('close',16)}</button></div>`).join('')}</div>` : `<div class="empty-state compact"><h3>لا توجد مفاتيح HMAC مهيأة</h3><p>لن تُقبل نبضات الجسر قبل وجود مفتاح فعّال.</p></div>`}</section><section class="panel ops-panel"><div class="panel-head"><div><h2>قائمة الأوامر</h2><p>${state.commandsConfigured ? `${state.commands.length} أمرًا في ملف الخادم.` : 'لم يهيّأ commands.json على الخادم.'}</p></div><span class="mini-status ${state.commandsConfigured && state.commands.length ? 'online' : 'warning'}">${state.commandsConfigured && state.commands.length ? 'مهيأ' : 'غير مهيأ'}</span></div><div class="panel-footnote">ملف الأوامر server-side فقط، ويُحمّل عند الطلب. لا يوجد تحرير أو رفع أوامر من الواجهة.</div></section>`;
 }
+function renderCommercialCenter() {
+  const modules = [
+    { path: '/rider', title: 'مساحة الراكب', subtitle: 'طلب الرحلة ومتابعة الحالة', description: 'واجهة الراكب الذكية، الدفع والمحفظة والملف الشخصي.', glyph: 'link', tone: 'cyan' },
+    { path: '/captain', title: 'مساحة الكابتن', subtitle: 'الرحلات والدخل والقبول', description: 'واجهة الكابتن وتسجيله ومتابعة الطلبات والأرباح.', glyph: 'cpu', tone: 'green' },
+    { path: '/office', title: 'الخدمات والمكتب', subtitle: 'التسجيل وخدمة الجمهور', description: 'مساحة الموظفين لمعالجة التسجيلات والطلبات وخدمة العملاء.', glyph: 'layers', tone: 'purple' },
+    { path: '/admin', title: 'الإدارة', subtitle: 'الحوكمة والصلاحيات', description: 'لوحة إدارة مستقلة بصلاحيات محددة وسجل تدقيق.', glyph: 'shield', tone: 'orange' },
+    { path: '/marketing', title: 'التسويق', subtitle: 'الحملات والإعلانات', description: 'إدارة الحملات والمحتوى ومؤشرات النمو من مركز واحد.', glyph: 'activity', tone: 'blue' },
+  ];
+  return `${sectionTitle('NEXORA · الجذر التجاري', 'مركز NEXSORA التجاري', 'بوابة واحدة لإدارة تطبيقات النقل والخدمات والتسويق. طبقة التحكم والجسر تبقى خلف الإدارة ولا تظهر كمنتج تجاري.', `${button('فتح التحكم والجسر', 'button secondary', 'go-control', 'cpu')}${button('تحديث المركز', 'button secondary', 'refresh-data', 'refresh')}`)}
+    <section class="center-hero"><div><span class="eyebrow">NEXSORA COMMAND · COMMERCIAL CENTER</span><h2>المركز الرئيسي للتطبيقات الذكية</h2><p>هذا هو الجذر الذي ستتصل به طبقات الراكب والكابتن والمكتب والإدارة والتسويق. كل طبقة مستقلة في الصلاحيات، وتبقى الأوامر التشغيلية محمية خلف جلسة المدير.</p><div class="center-hero-actions"><a class="button primary" href="/rider">فتح واجهة الراكب ${icon('arrow', 15)}</a><button class="button secondary" type="button" data-action="go-control">إدارة البنية الداخلية ${icon('cpu', 15)}</button></div></div><div class="center-orbit" aria-hidden="true"><span class="orbit-core">N</span><i></i><i></i><i></i></div></section>
+    <section class="center-module-grid" aria-label="طبقات المركز">${modules.map((module) => `<a class="center-module-card ${module.tone}" href="${module.path}"><span class="center-module-icon">${icon(module.glyph, 21)}</span><span class="center-module-copy"><strong>${module.title}</strong><small>${module.subtitle}</small><p>${module.description}</p></span><span class="center-module-arrow">${icon('arrow', 17)}</span></a>`).join('')}</section>
+    <div class="center-lower-grid"><section class="panel ops-panel"><div class="panel-head"><div><h2>الإشراف الداخلي</h2><p>Manus يبقى نافذة إشراف للمالك، وليس بوتاً أو مجموعة أو واجهة تشغيل مستقلة.</p></div><span class="mini-status info">محمي</span></div><div class="center-list"><div><span>${icon('shield', 16)} جلسة المدير</span><strong>${state.live ? 'مفعّلة ومتصلة' : 'بانتظار المصدر'}</strong></div><div><span>${icon('terminal', 16)} طبقة التحكم والجسر</span><strong>متاحة من القائمة الداخلية</strong></div><div><span>${icon('activity', 16)} آخر مزامنة</span><strong>${state.lastSync ? escapeHtml(relativeTime(state.lastSync)) : 'لم تبدأ بعد'}</strong></div></div></section><section class="panel ops-panel"><div class="panel-head"><div><h2>حدود المنتج</h2><p>فصل واضح بين تجربة المستخدم وعمليات الخادم.</p></div></div><div class="center-boundaries"><span>لا تظهر القروبات أو أرقام الهواتف في الجذر التجاري.</span><span>لا يُسمح بتنفيذ shell حر من الواجهة.</span><span>الطبقات الجديدة تُربط عبر مسارات واضحة واختبارات قبول.</span></div></section></div>`;
+}
 function renderModal() {
   if (state.modal.type === 'confirm-run') {
     const command = state.commands.find((item) => item.id === state.modal.commandId);
@@ -454,7 +468,8 @@ function renderModal() {
   return '';
 }
 function render() {
-  let content = renderDashboard();
+  let content = state.section === 'center' ? renderCommercialCenter() : renderDashboard();
+  if (state.section === 'center') content = renderCommercialCenter();
   if (state.section === 'commands') content = renderCommandCatalog();
   if (state.section === 'jobs') content = renderSignedJobsPage();
   if (state.section === 'devices') content = renderDevices();
@@ -730,6 +745,7 @@ function handleAction(action, element) {
   else if (action === 'refresh-render') loadRenderServices();
   else if (action === 'render-action') performRenderAction(element?.dataset.renderServiceId, element?.dataset.renderAction);
   else if (action === 'go-jobs') { state.section = 'jobs'; render(); }
+  else if (action === 'go-control') { state.section = 'dashboard'; render(); }
   else if (action === 'go-devices') { state.section = 'devices'; render(); }
   else if (action === 'go-executions') { state.section = 'executions'; render(); }
   else if (action === 'clear-result') { state.commandResult = null; state.executionStatus = 'idle'; render(); }
